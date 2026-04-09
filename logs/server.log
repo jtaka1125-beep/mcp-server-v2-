@@ -1,0 +1,21 @@
+2026-04-09 05:00:13,918 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_append_raw']
+2026-04-09 05:00:15,183 INFO mcp-server-v2 listening on port 3001
+2026-04-09 05:00:15,183 INFO Fallback: http://localhost:3000
+2026-04-09 05:00:41,601 INFO tool call (v2): memory_compact
+2026-04-09 05:01:05,916 INFO tool call (v2): memory_compact_status
+2026-04-09 05:01:11,136 INFO tool call (v2): memory_bootstrap
+2026-04-09 05:10:42,371 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_search_all', 'memory_append_raw', 'memory_append_decision', 'memory_decision_auto', 'memory_supersede', 'memory_active_decisions', 'memory_freshness']
+2026-04-09 05:10:43,624 INFO mcp-server-v2 listening on port 3001
+2026-04-09 05:10:43,625 INFO Fallback: http://localhost:3000
+2026-04-09 05:11:16,496 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_search_all', 'memory_append_raw', 'memory_append_decision', 'memory_decision_auto', 'memory_supersede', 'memory_active_decisions', 'memory_freshness', 'run_command', 'read_file', 'write_file', 'write_file_b64', 'list_files', 'git_status', 'status', 'restart_server', 'approve', 'adb_devices', 'adb_shell', 'screenshot', 'desktop_screenshot', 'usb_hub_control', 'wifi_adb_guard', 'safe_reboot', 'usb_recovery', 'build_mirage', 'run_mirage_gui']
+2026-04-09 05:11:17,749 INFO mcp-server-v2 listening on port 3001
+2026-04-09 05:11:17,749 INFO Fallback: http://localhost:3000
+2026-04-09 05:11:28,494 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_search_all', 'memory_append_raw', 'memory_append_decision', 'memory_decision_auto', 'memory_supersede', 'memory_active_decisions', 'memory_freshness', 'run_command', 'read_file', 'write_file', 'write_file_b64', 'list_files', 'git_status', 'status', 'restart_server', 'approve', 'adb_devices', 'adb_shell', 'screenshot', 'desktop_screenshot', 'usb_hub_control', 'wifi_adb_guard', 'safe_reboot', 'usb_recovery', 'build_mirage', 'run_mirage_gui']
+2026-04-09 05:11:29,744 INFO mcp-server-v2 listening on port 3001
+2026-04-09 05:11:29,745 INFO Fallback: http://localhost:3000
+2026-04-09 14:43:44,904 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_search_all', 'memory_append_raw', 'memory_append_decision', 'memory_decision_auto', 'memory_supersede', 'memory_active_decisions', 'memory_freshness', 'run_command', 'read_file', 'write_file', 'write_file_b64', 'list_files', 'git_status', 'status', 'restart_server', 'approve', 'adb_devices', 'adb_shell', 'screenshot', 'desktop_screenshot', 'usb_hub_control', 'wifi_adb_guard', 'safe_reboot', 'usb_recovery', 'build_mirage', 'run_mirage_gui', 'run_task', 'task_status', 'task_cancel', 'run_loop', 'run_loop_v2', 'loop_status', 'run_pipeline', 'pipeline_status', 'pipeline_cancel', 'pipeline_resume', 'queue_create_and_wait', 'detect_popup', 'ai_analyze', 'macro_screenshot', 'chat_with_ai']
+2026-04-09 14:43:46,156 INFO mcp-server-v2 listening on port 3001
+2026-04-09 14:43:46,156 INFO Fallback: http://localhost:3000
+2026-04-09 14:44:07,304 INFO Registered tools: ['memory_bootstrap', 'memory_compact', 'memory_compact_status', 'memory_search', 'memory_search_all', 'memory_append_raw', 'memory_append_decision', 'memory_decision_auto', 'memory_supersede', 'memory_active_decisions', 'memory_freshness', 'run_command', 'read_file', 'write_file', 'write_file_b64', 'list_files', 'git_status', 'status', 'restart_server', 'approve', 'adb_devices', 'adb_shell', 'screenshot', 'desktop_screenshot', 'usb_hub_control', 'wifi_adb_guard', 'safe_reboot', 'usb_recovery', 'build_mirage', 'run_mirage_gui', 'run_task', 'task_status', 'task_cancel', 'run_loop', 'run_loop_v2', 'loop_status', 'run_pipeline', 'pipeline_status', 'pipeline_cancel', 'pipeline_resume', 'queue_create_and_wait', 'detect_popup', 'ai_analyze', 'macro_screenshot', 'chat_with_ai']
+2026-04-09 14:44:08,564 INFO mcp-server-v2 listening on port 3001
+2026-04-09 14:44:08,565 INFO Fallback: http://localhost:3000
