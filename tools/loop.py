@@ -28,10 +28,12 @@ def _run_job(job_id: str, task: str, max_rounds: int, engine: str = None):
         from loop_engine_v2 import run_loop_v2
         result = run_loop_v2(task, max_rounds=max_rounds, engine=engine)
         with _jobs_lock:
+            if result is None:
+                result = {'status': 'error', 'error': 'run_loop_v2 returned None'}
             _loop_jobs[job_id]['status'] = result.get('status', 'done')
             _loop_jobs[job_id]['result'] = result
     except Exception as e:
-        log.error(f'loop job {job_id} error: {e}')
+        log.error(f'loop job {job_id} error: {e}', exc_info=True)  # traceback付き
         with _jobs_lock:
             _loop_jobs[job_id]['status'] = 'error'
             _loop_jobs[job_id]['result'] = {'error': str(e)}
