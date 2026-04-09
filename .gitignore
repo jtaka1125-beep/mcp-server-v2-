@@ -15,3 +15,10 @@ data/
 # 一時ファイル
 *.tmp
 *.bak
+"*.pyc"  
+"server.heartbeat"  
+"server.pid"  
+"patch_*.py"  
+"add_*.py"  
+"fix_*.py"  
+"install_*.ps1"  
