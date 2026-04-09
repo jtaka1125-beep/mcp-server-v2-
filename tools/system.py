@@ -199,6 +199,77 @@ def wait_for_approval(operation_id: str, timeout: int = 300) -> bool:
     return False
 
 # ---------------------------------------------------------------------------
+# git_diff - Show uncommitted changes (truncates large files)
+# ---------------------------------------------------------------------------
+def tool_git_diff(args: dict) -> dict:
+    """Show git diff with smart truncation per-file.
+    
+    Args:
+        cwd:        working directory (default MIRAGE_DIR)
+        staged:     bool - show staged diff (default False = working tree)
+        stat_only:  bool - show only --stat (default False)
+        max_lines:  int  - max diff lines total (default 200)
+        path:       str  - limit diff to specific file/dir
+    """
+    cwd       = (args or {}).get('cwd', MIRAGE_DIR)
+    staged    = bool((args or {}).get('staged', False))
+    stat_only = bool((args or {}).get('stat_only', False))
+    max_lines = int((args or {}).get('max_lines', 200) or 200)
+    path      = (args or {}).get('path', '')
+
+    try:
+        # Always get stat first
+        stat_cmd = ['git', 'diff', '--stat']
+        if staged:
+            stat_cmd.insert(2, '--staged')
+        if path:
+            stat_cmd.append('--')
+            stat_cmd.append(path)
+        stat_r = subprocess.run(
+            stat_cmd, capture_output=True, text=True,
+            timeout=10, cwd=cwd, encoding='utf-8', errors='replace',
+        )
+        stat_out = stat_r.stdout.strip()
+
+        if stat_only or not stat_out:
+            return {
+                'stat': stat_out or '(no changes)',
+                'diff': None,
+                'truncated': False,
+            }
+
+        # Get full diff
+        diff_cmd = ['git', 'diff', '--no-color']
+        if staged:
+            diff_cmd.insert(2, '--staged')
+        if path:
+            diff_cmd += ['--', path]
+        diff_r = subprocess.run(
+            diff_cmd, capture_output=True, text=True,
+            timeout=15, cwd=cwd, encoding='utf-8', errors='replace',
+        )
+        lines = diff_r.stdout.split('\n')
+        truncated = len(lines) > max_lines
+        if truncated:
+            # Keep first max_lines, add summary
+            shown = lines[:max_lines]
+            omitted = len(lines) - max_lines
+            shown.append(f'\n... [{omitted} more lines omitted - use stat_only=true or path= to narrow]')
+            diff_out = '\n'.join(shown)
+        else:
+            diff_out = diff_r.stdout
+
+        return {
+            'stat': stat_out,
+            'diff': diff_out,
+            'truncated': truncated,
+            'total_lines': len(lines),
+        }
+    except Exception as e:
+        return {'error': str(e)}
+
+
+# ---------------------------------------------------------------------------
 # ツール登録テーブル
 # ---------------------------------------------------------------------------
 TOOLS = {
@@ -242,6 +313,17 @@ TOOLS = {
             'pattern': {'type': 'string'},
         }},
         'handler': tool_list_files,
+    },
+    'git_diff': {
+        'description': 'Show uncommitted changes with smart per-file truncation. Use stat_only=true for overview, path= to narrow.',
+        'schema': {'type': 'object', 'properties': {
+            'cwd':       {'type': 'string'},
+            'staged':    {'type': 'boolean', 'description': 'Show staged diff'},
+            'stat_only': {'type': 'boolean', 'description': 'Show only --stat overview'},
+            'max_lines': {'type': 'integer', 'description': 'Max diff lines (default 200)'},
+            'path':      {'type': 'string',  'description': 'Limit to file or directory'},
+        }},
+        'handler': tool_git_diff,
     },
     'git_status': {
         'description': 'Get git repository status.',

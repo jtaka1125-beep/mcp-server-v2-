@@ -1180,7 +1180,258 @@ JSON only, no explanation."""
     }
 
 
+
+# ---------------------------------------------------------------------------
+# active_context - 今何が最優先か一発で返す (会話開始時の一発リカバリ)
+# ---------------------------------------------------------------------------
+def tool_active_context(args: dict) -> dict:
+    """Return the highest-priority context for session recovery.
+    
+    Combines:
+    - L0 bootstrap summary for each namespace (50-100 tok each)
+    - Top active decisions by importance (L1 top-5)
+    - Recent activity summary (last N hours)
+    - Physical TODO items (hardcoded awareness)
+    
+    Designed to restore full situational awareness in < 1 tool call.
+    
+    Args:
+        namespaces:    list of namespaces (default: mirage-vulkan, mirage-infra, mirage-android)
+        top_decisions: int (default 5) - number of top decisions to include
+        hours:         int (default 24) - recent activity window
+    """
+    import time
+    
+    ns_list      = (args or {}).get('namespaces', ['mirage-vulkan', 'mirage-infra', 'mirage-android'])
+    top_n        = int((args or {}).get('top_decisions', 5) or 5)
+    hours        = int((args or {}).get('hours', 24) or 24)
+    
+    result = {
+        'generated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
+        'l0_summaries': {},
+        'top_decisions': [],
+        'recent_activity': {},
+        'physical_todos': [],
+    }
+    
+    # L0: bootstrap summaries
+    from memory import store as mem
+    for ns in ns_list:
+        try:
+            b = mem.get_bootstrap(ns, max_chars=300)
+            if b.get('summary'):
+                result['l0_summaries'][ns] = b['summary'][:300]
+        except Exception:
+            pass
+    
+    # Top decisions across all namespaces
+    try:
+        from memory_store import search_all
+        hits = search_all(query='', types=['decision'], limit=top_n * 3)
+        decisions = [h for h in hits.get('hits', [])
+                     if not h.get('superseded_by')]
+        # Sort by importance_v2 desc
+        decisions.sort(key=lambda x: float(x.get('importance_v2', 0.5)), reverse=True)
+        result['top_decisions'] = [
+            {
+                'id': d.get('id', '')[:8],
+                'namespace': d.get('namespace', ''),
+                'title': d.get('title', ''),
+                'content': str(d.get('snippet') or d.get('content', ''))[:120],
+                'importance': d.get('importance_v2', 0.5),
+            }
+            for d in decisions[:top_n]
+        ]
+    except Exception as e:
+        result['top_decisions_error'] = str(e)
+    
+    # Recent activity
+    cutoff = int(time.time()) - hours * 3600
+    try:
+        import sqlite3
+        db = r'C:\MirageWork\mcp-server\data\memory.db'
+        con = sqlite3.connect(db)
+        rows = con.execute(
+            """SELECT namespace, COUNT(*) as cnt, MAX(created_at) as latest
+               FROM entries
+               WHERE created_at > ?
+               GROUP BY namespace
+               ORDER BY cnt DESC""",
+            (cutoff,)
+        ).fetchall()
+        con.close()
+        result['recent_activity'] = {
+            r[0]: {'new_entries': r[1], 'latest': time.strftime('%H:%M', time.localtime(r[2]))}
+            for r in rows
+        }
+    except Exception as e:
+        result['recent_activity_error'] = str(e)
+    
+    # Physical TODOs (always-present hardware awareness)
+    result['physical_todos'] = [
+        'X1: USB tethering first-time enable (need physical: Settings > tethering)',
+        'A9#479: USB offline recovery (physical reconnect needed)',
+        'Build verify: UnifiedLayer context addition compile check',
+    ]
+    
+    # Summary line
+    ns_with_summary = len(result['l0_summaries'])
+    total_decisions = len(result['top_decisions'])
+    total_recent = sum(v['new_entries'] for v in result['recent_activity'].values())
+    result['summary'] = (
+        f"{ns_with_summary} namespace summaries | "
+        f"{total_decisions} top decisions | "
+        f"{total_recent} new entries in last {hours}h | "
+        f"{len(result['physical_todos'])} physical TODOs"
+    )
+    
+    return result
+
+
+# ---------------------------------------------------------------------------
+# memory_recent_activity - 直近N日の変更サマリー
+# ---------------------------------------------------------------------------
+def tool_memory_recent_activity(args: dict) -> dict:
+    """Return a summary of memory changes in the last N days/hours.
+    
+    Shows: new entries by namespace/type, access patterns, 
+    decision changes, bootstrap update recency.
+    
+    Args:
+        days:       float - lookback window in days (default 1.0 = last 24h)
+        namespace:  optional namespace filter
+        detail:     bool - include entry titles (default False = counts only)
+    """
+    import time, sqlite3
+    
+    days      = float((args or {}).get('days', 1.0) or 1.0)
+    ns_filter = (args or {}).get('namespace', None)
+    detail    = bool((args or {}).get('detail', False))
+    
+    cutoff = int(time.time()) - int(days * 86400)
+    db     = r'C:\MirageWork\mcp-server\data\memory.db'
+    
+    try:
+        con = sqlite3.connect(db)
+        
+        # New entries breakdown
+        ns_clause = 'AND namespace = ?' if ns_filter else ''
+        ns_params = [ns_filter] if ns_filter else []
+        
+        new_by_ns_type = con.execute(f"""
+            SELECT namespace, type, COUNT(*) as cnt
+            FROM entries
+            WHERE created_at > ? {ns_clause}
+            GROUP BY namespace, type
+            ORDER BY cnt DESC
+        """, [cutoff] + ns_params).fetchall()
+        
+        # Accessed entries (touch_entry called)
+        accessed = con.execute(f"""
+            SELECT namespace, COUNT(*) as cnt
+            FROM entries
+            WHERE last_accessed > ? {ns_clause}
+            GROUP BY namespace
+            ORDER BY cnt DESC
+        """, [cutoff] + ns_params).fetchall()
+        
+        # Decision changes specifically
+        new_decisions = con.execute(f"""
+            SELECT namespace, title, importance_v2, created_at
+            FROM entries
+            WHERE type = 'decision' AND created_at > ? {ns_clause}
+            ORDER BY importance_v2 DESC
+            LIMIT 10
+        """, [cutoff] + ns_params).fetchall()
+        
+        # Bootstrap update recency
+        boot_rows = con.execute(
+            "SELECT namespace, updated_at FROM bootstrap ORDER BY updated_at DESC"
+        ).fetchall()
+        
+        # Totals
+        total_new = sum(r[2] for r in new_by_ns_type)
+        total_accessed = sum(r[1] for r in accessed)
+        
+        result = {
+            'window': f'last {days}d ({time.strftime("%Y-%m-%d %H:%M", time.localtime(cutoff))} to now)',
+            'total_new_entries': total_new,
+            'total_accessed': total_accessed,
+            'new_by_namespace': {},
+            'accessed_by_namespace': {r[0]: r[1] for r in accessed},
+            'new_decisions': [],
+            'bootstrap_freshness': {},
+        }
+        
+        # Aggregate by namespace
+        for row in new_by_ns_type:
+            ns, etype, cnt = row
+            if ns not in result['new_by_namespace']:
+                result['new_by_namespace'][ns] = {}
+            result['new_by_namespace'][ns][etype] = cnt
+        
+        # Decisions
+        now = int(time.time())
+        for row in new_decisions:
+            entry = {
+                'namespace': row[0],
+                'title': (row[1] or '')[:60],
+                'importance': round(float(row[2] or 0.5), 2),
+                'age_min': int((now - row[3]) / 60),
+            }
+            result['new_decisions'].append(entry)
+        
+        # Bootstrap freshness
+        for row in boot_rows:
+            age_h = round((now - row[1]) / 3600, 1)
+            result['bootstrap_freshness'][row[0]] = {
+                'age_hours': age_h,
+                'fresh': age_h < 72,
+            }
+        
+        # Detail: entry titles
+        if detail and total_new > 0:
+            detail_rows = con.execute(f"""
+                SELECT namespace, type, title, created_at
+                FROM entries
+                WHERE created_at > ? {ns_clause}
+                ORDER BY created_at DESC
+                LIMIT 20
+            """, [cutoff] + ns_params).fetchall()
+            result['recent_entries'] = [
+                {
+                    'namespace': r[0], 'type': r[1],
+                    'title': (r[2] or '')[:60],
+                    'age_min': int((now - r[3]) / 60),
+                }
+                for r in detail_rows
+            ]
+        
+        con.close()
+        return result
+    except Exception as e:
+        return {'error': str(e)}
+
+
 TOOLS = {
+    'active_context': {
+        'description': 'One-shot session recovery: returns L0 summaries + top decisions + recent activity + physical TODOs. Call at session start.',
+        'schema': {'type': 'object', 'properties': {
+            'namespaces':    {'type': 'array', 'items': {'type': 'string'}, 'description': 'Namespaces to include (default: vulkan/infra/android)'},
+            'top_decisions': {'type': 'integer', 'description': 'Number of top decisions (default 5)'},
+            'hours':         {'type': 'integer', 'description': 'Recent activity window in hours (default 24)'},
+        }},
+        'handler': tool_active_context,
+    },
+    'memory_recent_activity': {
+        'description': 'Summary of memory changes in last N days: new entries by namespace/type, accessed entries, decision changes, bootstrap freshness.',
+        'schema': {'type': 'object', 'properties': {
+            'days':      {'type': 'number',  'description': 'Lookback window in days (default 1.0 = 24h)'},
+            'namespace': {'type': 'string',  'description': 'Optional namespace filter'},
+            'detail':    {'type': 'boolean', 'description': 'Include entry titles (default False)'},
+        }},
+        'handler': tool_memory_recent_activity,
+    },
     'memory_bootstrap': {
         'description': 'Get bootstrap summary for a namespace.',
         'schema': {'type': 'object', 'properties': {

@@ -25,6 +25,20 @@ _tasks: dict = {}
 _tasks_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
+# Server log tail helper (auto-attach on failure)
+# ---------------------------------------------------------------------------
+def _get_server_log_tail(n: int = 20) -> str:
+    """Return last N lines of server.log, empty string on error."""
+    import os as _os
+    log_path = _os.path.join(_os.path.dirname(_os.path.dirname(__file__)), 'logs', 'server.log')
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        return ''.join(lines[-n:]).strip()
+    except Exception:
+        return ''
+
+# ---------------------------------------------------------------------------
 # Claude Code CLI 実行
 # ---------------------------------------------------------------------------
 def _run_claude_async(task_id: str, prompt: str, cwd: str, model: str = None):
@@ -56,18 +70,32 @@ def _run_claude_async(task_id: str, prompt: str, cwd: str, model: str = None):
             output += f'\n[stderr]: {result.stderr[:500]}'
         output += f'\n[exit_code]: {result.returncode}'
 
+        # Attach server log tail on non-zero exit
+        if result.returncode != 0:
+            log_tail = _get_server_log_tail(20)
+            if log_tail:
+                output += f'\n\n--- Server Log (last 20 lines) ---\n{log_tail}'
         with _tasks_lock:
             _tasks[task_id]['status'] = 'completed'
             _tasks[task_id]['output'] = output
 
     except subprocess.TimeoutExpired:
+        log_tail = _get_server_log_tail(30)
         with _tasks_lock:
             _tasks[task_id]['status'] = 'timeout'
-            _tasks[task_id]['output'] = 'ERROR: timeout after 300s'
+            _tasks[task_id]['output'] = (
+                'ERROR: timeout after 300s'
+                + (f'\n\n--- Server Log (last 30 lines) ---\n{log_tail}' if log_tail else '')
+            )
     except Exception as e:
+        log_tail = _get_server_log_tail(20)
         with _tasks_lock:
             _tasks[task_id]['status'] = 'error'
             _tasks[task_id]['error'] = str(e)
+            _tasks[task_id]['output'] = (
+                f'ERROR: {e}'
+                + (f'\n\n--- Server Log (last 20 lines) ---\n{log_tail}' if log_tail else '')
+            )
 
 # ---------------------------------------------------------------------------
 # run_task
