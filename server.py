@@ -16,6 +16,25 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# ---------------------------------------------------------------------------
+# .env loader (shared with mcp-server)
+# ---------------------------------------------------------------------------
+def _load_env():
+    env_path = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'mcp-server', '.env'))
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, _, val = line.partition('=')
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+_load_env()
+
 from config import PORT_NEW
 from fallback import call_fallback
 import tools.memory as memory_tools
@@ -45,9 +64,6 @@ import tools.task     as task_tools;     TOOLS.update(task_tools.TOOLS)
 import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
 import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
-# 今後追加:
-# from tools.device import TOOLS as device_tools; TOOLS.update(device_tools)
-# from tools.pipeline import TOOLS as pipeline_tools; TOOLS.update(pipeline_tools)
 
 log.info(f'Registered tools: {list(TOOLS.keys())}')
 
@@ -175,6 +191,36 @@ class MCPHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {'name': 'mirage-mcp-v2', 'status': 'ok', 'port': PORT_NEW})
             elif section == 'url_queue':
                 self._send_json(200, {'cleared': 0, 'note': 'v2 has no url_queue'})
+            elif section == 'adb':
+                import tools.device as dev_tools
+                if action == 'devices':
+                    result = dev_tools.TOOLS['adb_devices']['handler']({})
+                    self._send_json(200, result)
+                else:
+                    cmd = qs.get('cmd', [''])[0]
+                    device = qs.get('device', [''])[0]
+                    result = dev_tools.TOOLS['adb_shell']['handler']({'command': cmd, 'device': device})
+                    self._send_json(200, result)
+            elif section == 'git':
+                import tools.system as sys_tools2
+                result = sys_tools2.TOOLS['git_status']['handler']({})
+                self._send_json(200, result)
+            elif section == 'exec':
+                import urllib.parse as _up
+                cmd = _up.unquote_plus(qs.get('cmd', [''])[0])
+                import tools.system as sys_tools3
+                result = sys_tools3.TOOLS['run_command']['handler']({'command': cmd})
+                self._send_json(200, result)
+            elif section == 'read':
+                file_path = qs.get('path', [''])[0]
+                import tools.system as sys_tools4
+                result = sys_tools4.TOOLS['read_file']['handler']({'path': file_path})
+                self._send_json(200, result)
+            elif section == 'list':
+                file_path = qs.get('path', [''])[0]
+                import tools.system as sys_tools5
+                result = sys_tools5.TOOLS['list_files']['handler']({'path': file_path})
+                self._send_json(200, result)
             else:
                 self._send_json(404, {'error': f'unknown section: {section}'})
         except Exception as e:
@@ -270,8 +316,6 @@ def check_pid_alive(pid: int) -> bool:
             ['tasklist', '/FI', f'PID eq {pid}', '/NH', '/FO', 'CSV'],
             capture_output=True, text=True, timeout=5
         )
-        # CSV output: "python3.exe","12345","Console","1","xx MB"
-        # Check that the exact PID appears in the output
         return f'"{pid}"' in result.stdout
     except Exception:
         return False
