@@ -217,7 +217,131 @@ def tool_usb_recovery(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # ツール登録テーブル
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# device_health - One-shot device health check
+# ---------------------------------------------------------------------------
+def tool_device_health(args: dict) -> dict:
+    """Check device health in one call: WiFi ADB, TCP port reachability,
+    APK running, battery level, screen state, RNDIS IP.
+
+    Args:
+        device:     WiFi ADB address (e.g. 192.168.0.10:5555)
+        tcp_host:   USBLAN/WiFi IP for TCP port check
+        tcp_port:   Video TCP port (e.g. 50000)
+        apk_pkg:    APK package name (default: com.mirage.capture)
+    """
+    import socket as _socket
+    import subprocess as _sub
+
+    device   = (args or {}).get('device', '')
+    tcp_host = (args or {}).get('tcp_host', '')
+    tcp_port = int((args or {}).get('tcp_port', 0) or 0)
+    apk_pkg  = (args or {}).get('apk_pkg', 'com.mirage.capture')
+    adb_exe  = r'C:\Users\jun\AppData\Local\Android\Sdk\platform-tools\adb.exe'
+
+    result = {
+        'device': device,
+        'wifi_adb': False,
+        'tcp_reachable': None,
+        'apk_running': False,
+        'battery': None,
+        'screen_on': None,
+        'rndis_ip': None,
+        'errors': [],
+    }
+
+    if not device:
+        return {'error': 'device required (e.g. 192.168.0.10:5555)'}
+
+    def _adb(cmd, timeout=5):
+        try:
+            r = _sub.run(
+                [adb_exe, '-s', device, 'shell'] + cmd.split(),
+                capture_output=True, text=True,
+                timeout=timeout, encoding='utf-8', errors='replace',
+            )
+            return r.stdout.strip(), r.returncode == 0
+        except Exception as e:
+            return str(e), False
+
+    # 1. WiFi ADB connectivity
+    try:
+        r = _sub.run(
+            [adb_exe, 'connect', device],
+            capture_output=True, text=True, timeout=5,
+            encoding='utf-8', errors='replace',
+        )
+        result['wifi_adb'] = 'connected' in r.stdout.lower() or 'already' in r.stdout.lower()
+    except Exception as e:
+        result['errors'].append(f'adb_connect: {e}')
+
+    if result['wifi_adb']:
+        # 2. Battery
+        out, ok = _adb('dumpsys battery')
+        if ok:
+            for line in out.split('\n'):
+                if 'level:' in line.lower():
+                    try:
+                        result['battery'] = int(line.split(':')[1].strip())
+                    except Exception:
+                        pass
+                    break
+
+        # 3. Screen state
+        out, ok = _adb('dumpsys power')
+        if ok:
+            result['screen_on'] = 'mWakefulness=Awake' in out or 'Display Power: state=ON' in out
+
+        # 4. APK running
+        out, ok = _adb(f'pidof {apk_pkg}')
+        result['apk_running'] = ok and bool(out.strip())
+
+        # 5. RNDIS IP (rndis0 or usb0)
+        for iface in ('rndis0', 'usb0', 'rndis1'):
+            out, ok = _adb(f'ip addr show {iface}')
+            if ok and 'inet ' in out:
+                import re as _re
+                m = _re.search(r'inet (\d+\.\d+\.\d+\.\d+)', out)
+                if m:
+                    result['rndis_ip'] = m.group(1)
+                    result['rndis_iface'] = iface
+                    break
+
+    # 6. TCP port reachability (independent of ADB)
+    if tcp_host and tcp_port:
+        try:
+            sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            sock.settimeout(2)
+            r = sock.connect_ex((tcp_host, tcp_port))
+            sock.close()
+            result['tcp_reachable'] = (r == 0)
+        except Exception as e:
+            result['tcp_reachable'] = False
+            result['errors'].append(f'tcp: {e}')
+
+    # Overall health score
+    checks = [result['wifi_adb'], result['apk_running']]
+    if result['tcp_reachable'] is not None:
+        checks.append(result['tcp_reachable'])
+    passed = sum(1 for c in checks if c)
+    result['health'] = 'GREEN' if passed == len(checks) else \
+                       'YELLOW' if passed > 0 else 'RED'
+    result['health_score'] = f'{passed}/{len(checks)}'
+
+    return result
+
+
 TOOLS = {
+    'device_health': {
+        'description': 'One-shot device health check: WiFi ADB + TCP port + APK running + battery + screen + RNDIS IP. Returns health=GREEN/YELLOW/RED.',
+        'schema': {'type': 'object', 'properties': {
+            'device':   {'type': 'string', 'description': 'WiFi ADB address (e.g. 192.168.0.10:5555)'},
+            'tcp_host': {'type': 'string', 'description': 'IP for TCP port check'},
+            'tcp_port': {'type': 'integer', 'description': 'TCP video port (e.g. 50000)'},
+            'apk_pkg':  {'type': 'string',  'description': 'APK package (default: com.mirage.capture)'},
+        }, 'required': ['device']},
+        'handler': tool_device_health,
+    },
     'adb_devices': {
         'description': 'List connected Android devices.',
         'schema': {'type': 'object', 'properties': {}},

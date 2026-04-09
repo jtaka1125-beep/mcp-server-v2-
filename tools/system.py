@@ -269,10 +269,209 @@ def tool_git_diff(args: dict) -> dict:
         return {'error': str(e)}
 
 
+
+# ---------------------------------------------------------------------------
+# code_search - Pattern search across source files
+# ---------------------------------------------------------------------------
+def tool_code_search(args: dict) -> dict:
+    """Search for a pattern across source files. Returns file:line:content hits.
+
+    Args:
+        pattern:   Regex or literal string to search
+        include:   Comma-separated glob patterns (default: *.cpp,*.hpp,*.py,*.kt)
+        path:      Root directory to search (default: MIRAGE_DIR)
+        context:   Lines of context around each match (default: 0)
+        max_hits:  Max results to return (default: 30)
+        literal:   bool - treat pattern as literal string not regex (default: False)
+    """
+    import re as _re
+
+    pattern   = (args or {}).get('pattern', '')
+    include   = (args or {}).get('include', '*.cpp,*.hpp,*.py,*.kt')
+    root      = (args or {}).get('path', MIRAGE_DIR)
+    context   = int((args or {}).get('context', 0) or 0)
+    max_hits  = int((args or {}).get('max_hits', 30) or 30)
+    literal   = bool((args or {}).get('literal', False))
+
+    if not pattern:
+        return {'error': 'pattern required'}
+
+    # Build file list via glob
+    import glob as _glob
+    patterns = [p.strip() for p in include.split(',')]
+    files = []
+    for pat in patterns:
+        files.extend(_glob.glob(
+            os.path.join(root, '**', pat), recursive=True
+        ))
+    # Exclude build dirs, __pycache__, .git
+    skip = {'.git', 'build', 'Debug', 'Release', '__pycache__', '.vs', 'out'}
+    files = [f for f in files if not any(s in f.split(os.sep) for s in skip)]
+
+    if literal:
+        search_str = _re.escape(pattern)
+    else:
+        search_str = pattern
+
+    try:
+        regex = _re.compile(search_str, _re.IGNORECASE)
+    except _re.error as e:
+        return {'error': f'invalid regex: {e}'}
+
+    hits = []
+    for fpath in sorted(files):
+        try:
+            lines = open(fpath, 'r', encoding='utf-8', errors='replace').readlines()
+        except Exception:
+            continue
+        for i, line in enumerate(lines):
+            if regex.search(line):
+                entry = {
+                    'file': os.path.relpath(fpath, root).replace('\\', '/'),
+                    'line': i + 1,
+                    'text': line.rstrip(),
+                }
+                if context > 0:
+                    ctx_lines = []
+                    for ci in range(max(0, i - context), min(len(lines), i + context + 1)):
+                        prefix = '>' if ci == i else ' '
+                        ctx_lines.append(f'{prefix} {ci+1}: {lines[ci].rstrip()}')
+                    entry['context'] = '\n'.join(ctx_lines)
+                hits.append(entry)
+                if len(hits) >= max_hits:
+                    break
+        if len(hits) >= max_hits:
+            break
+
+    return {
+        'hits': hits,
+        'count': len(hits),
+        'truncated': len(hits) >= max_hits,
+        'pattern': pattern,
+        'files_searched': len(files),
+    }
+
+
+# ---------------------------------------------------------------------------
+# build_and_report - Run cmake build and return structured error report
+# ---------------------------------------------------------------------------
+def tool_build_and_report(args: dict) -> dict:
+    """Run cmake --build and return structured error/warning report.
+
+    Parses MSVC/GCC/Clang output into structured errors with file/line/message.
+
+    Args:
+        build_dir:   cmake build directory (default: MIRAGE_DIR/build)
+        target:      cmake target (default: all)
+        config:      Release|Debug (default: Debug)
+        max_errors:  max errors to return (default: 20)
+        jobs:        parallel jobs (default: 4)
+    """
+    import re as _re
+
+    build_dir  = (args or {}).get('build_dir',
+                   os.path.join(MIRAGE_DIR, 'build'))
+    target     = (args or {}).get('target', '')
+    config     = (args or {}).get('config', 'Debug')
+    max_errors = int((args or {}).get('max_errors', 20) or 20)
+    jobs       = int((args or {}).get('jobs', 4) or 4)
+
+    cmd = f'cmake --build . --config {config} --parallel {jobs}'
+    if target:
+        cmd += f' --target {target}'
+
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True,
+            timeout=300, cwd=build_dir, encoding='utf-8', errors='replace',
+        )
+    except subprocess.TimeoutExpired:
+        return {'ok': False, 'error': 'build timeout after 300s'}
+    except FileNotFoundError:
+        return {'ok': False, 'error': f'build_dir not found: {build_dir}'}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+    combined = (result.stdout or '') + '\n' + (result.stderr or '')
+    lines = combined.split('\n')
+
+    # Parse errors and warnings
+    # MSVC:  file.cpp(42): error C2065: ...
+    # GCC:   file.cpp:42:10: error: ...
+    # Ninja: FAILED: path/to/file.cpp.obj
+    error_pat = _re.compile(
+        r'(?P<file>[^\s(]+?[.](cpp|hpp|c|h|py|kt))'
+        r'[:(](?P<line>\d+)[):,]'
+        r'.*?(?P<sev>error|warning|note)\s*(?:[A-Z]\d+)?:\s*'
+        r'(?P<msg>.+)',
+        _re.IGNORECASE
+    )
+
+    errors = []
+    warnings = []
+    failed_files = []
+
+    for line in lines:
+        m = error_pat.search(line)
+        if m:
+            entry = {
+                'file': os.path.relpath(m.group('file'), build_dir)
+                        if os.path.isabs(m.group('file')) else m.group('file'),
+                'line': int(m.group('line')),
+                'severity': m.group('sev').lower(),
+                'message': m.group('msg').strip()[:200],
+            }
+            if entry['severity'] == 'error':
+                errors.append(entry)
+            else:
+                warnings.append(entry)
+        elif 'FAILED:' in line:
+            fname = line.replace('FAILED:', '').strip()
+            if fname:
+                failed_files.append(fname)
+
+    # Build summary
+    ok = result.returncode == 0
+    return {
+        'ok': ok,
+        'exit_code': result.returncode,
+        'errors': errors[:max_errors],
+        'errors_count': len(errors),
+        'warnings_count': len(warnings),
+        'warnings': warnings[:5],  # top 5 warnings
+        'failed_files': failed_files[:10],
+        'log_tail': '\n'.join(lines[-30:]) if not ok else '',
+        'build_dir': build_dir,
+        'config': config,
+    }
+
 # ---------------------------------------------------------------------------
 # ツール登録テーブル
 # ---------------------------------------------------------------------------
 TOOLS = {
+    'code_search': {
+        'description': 'Search pattern across source files. Returns file:line:text hits with optional context lines.',
+        'schema': {'type': 'object', 'properties': {
+            'pattern':  {'type': 'string', 'description': 'Regex or literal search pattern'},
+            'include':  {'type': 'string', 'description': 'Comma-separated globs (default: *.cpp,*.hpp,*.py,*.kt)'},
+            'path':     {'type': 'string', 'description': 'Root directory'},
+            'context':  {'type': 'integer', 'description': 'Lines of context (default 0)'},
+            'max_hits': {'type': 'integer', 'description': 'Max results (default 30)'},
+            'literal':  {'type': 'boolean', 'description': 'Literal string match (default False)'},
+        }, 'required': ['pattern']},
+        'handler': tool_code_search,
+    },
+    'build_and_report': {
+        'description': 'Run cmake --build and return structured {ok, errors:[{file,line,severity,message}], warnings_count, log_tail}.',
+        'schema': {'type': 'object', 'properties': {
+            'build_dir':  {'type': 'string', 'description': 'cmake build directory'},
+            'target':     {'type': 'string', 'description': 'cmake target (default: all)'},
+            'config':     {'type': 'string', 'description': 'Release|Debug (default: Debug)'},
+            'max_errors': {'type': 'integer', 'description': 'Max errors in response (default 20)'},
+            'jobs':       {'type': 'integer', 'description': 'Parallel jobs (default 4)'},
+        }},
+        'handler': tool_build_and_report,
+    },
     'run_command': {
         'description': 'Run a shell command in the workspace.',
         'schema': {'type': 'object', 'properties': {

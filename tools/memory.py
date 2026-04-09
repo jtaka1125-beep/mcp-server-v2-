@@ -1413,7 +1413,244 @@ def tool_memory_recent_activity(args: dict) -> dict:
         return {'error': str(e)}
 
 
+
+# ---------------------------------------------------------------------------
+# session_checkpoint - まとめて今日の成果を記録してProject State更新
+# ---------------------------------------------------------------------------
+def tool_session_checkpoint(args: dict) -> dict:
+    """End-of-session checkpoint: summarize work done, save to memory,
+    optionally update PROJECT_STATE.md.
+
+    Auto-collects from git log, memory recent activity, and user-provided text.
+
+    Args:
+        done:        str  - what was accomplished (freeform)
+        next:        list - next action items
+        issues:      list - unresolved issues / blockers
+        namespace:   str  - primary namespace for decisions (default: mirage-infra)
+        update_md:   bool - update PROJECT_STATE.md (default: True)
+        git_cwd:     str  - git repo for log (default: MirageVulkan)
+        importance:  int  - 1-5 (default: 4)
+    """
+    import time, subprocess as _sub, re as _re
+
+    done      = (args or {}).get('done', '')
+    next_acts = (args or {}).get('next', [])
+    issues    = (args or {}).get('issues', [])
+    ns        = (args or {}).get('namespace', 'mirage-infra')
+    update_md = bool((args or {}).get('update_md', True))
+    git_cwd   = (args or {}).get('git_cwd', r'C:\MirageWork\MirageVulkan')
+    importance = int((args or {}).get('importance', 4) or 4)
+
+    timestamp = time.strftime('%Y-%m-%d %H:%M')
+    result = {'timestamp': timestamp, 'saved': [], 'errors': []}
+
+    # 1. Collect recent git commits
+    git_summary = ''
+    try:
+        r = _sub.run(
+            'git log --oneline --since="24 hours ago"',
+            shell=True, capture_output=True, text=True,
+            timeout=10, cwd=git_cwd, encoding='utf-8', errors='replace',
+        )
+        commits = r.stdout.strip()
+        if commits:
+            git_summary = f'Git commits (last 24h):\n{commits}'
+    except Exception:
+        pass
+
+    # 2. Build checkpoint content
+    parts = [f'# Session Checkpoint {timestamp}']
+    if done:
+        parts.append(f'\n## 完了\n{done}')
+    if git_summary:
+        parts.append(f'\n## {git_summary}')
+    if next_acts:
+        items = next_acts if isinstance(next_acts, list) else [next_acts]
+        parts.append('\n## 次のアクション\n' + '\n'.join(f'- {a}' for a in items))
+    if issues:
+        items = issues if isinstance(issues, list) else [issues]
+        parts.append('\n## 未解決\n' + '\n'.join(f'- {i}' for i in items))
+
+    checkpoint_text = '\n'.join(parts)
+
+    # 3. Save to memory
+    from memory import store as mem
+    try:
+        mem.append_entry(
+            namespace=ns,
+            type_='decision',
+            title=f'Session Checkpoint {timestamp}',
+            content=checkpoint_text,
+            tags=['checkpoint', 'session'],
+            importance=importance,
+            role='system',
+        )
+        result['saved'].append(f'memory:{ns}')
+    except Exception as e:
+        result['errors'].append(f'memory: {e}')
+
+    # 4. Update PROJECT_STATE.md
+    if update_md:
+        md_path = r'C:\MirageWork\MirageVulkan\PROJECT_STATE.md'
+        try:
+            md = open(md_path, 'r', encoding='utf-8').read()
+
+            # Update "Last Updated" line or prepend checkpoint section
+            checkpoint_block = (
+                f'\n## Last Session ({timestamp})\n'
+                + (f'**Done**: {done[:200]}\n' if done else '')
+                + ('**Next**: ' + ', '.join(str(a) for a in next_acts[:3]) + '\n' if next_acts else '')
+                + ('**Blockers**: ' + ', '.join(str(i) for i in issues[:3]) + '\n' if issues else '')
+            )
+
+            # Replace existing "Last Session" block if present
+            if '## Last Session' in md:
+                md = _re.sub(
+                    r'## Last Session.*?(?=\n## |\Z)',
+                    checkpoint_block.strip() + '\n',
+                    md, flags=_re.DOTALL
+                )
+            else:
+                # Prepend after first heading
+                first_h2 = md.find('\n## ')
+                if first_h2 >= 0:
+                    md = md[:first_h2] + checkpoint_block + md[first_h2:]
+                else:
+                    md = checkpoint_block + '\n' + md
+
+            open(md_path, 'w', encoding='utf-8').write(md)
+            result['saved'].append('PROJECT_STATE.md')
+        except Exception as e:
+            result['errors'].append(f'PROJECT_STATE.md: {e}')
+
+    result['checkpoint'] = checkpoint_text
+    result['ok'] = len(result['errors']) == 0
+    return result
+
+
+# ---------------------------------------------------------------------------
+# memory_diff - Compare bootstrap before/after to see what changed
+# ---------------------------------------------------------------------------
+def tool_memory_diff(args: dict) -> dict:
+    """Show what changed in memory since a reference point.
+
+    Compares current bootstrap summaries with a saved snapshot,
+    or shows entries added/modified in the last N hours.
+
+    Args:
+        namespace:    namespace to diff (None = all)
+        hours:        lookback window (default 24h)
+        mode:         'entries' = new/modified entries
+                      'bootstrap' = compare stored snapshots
+                      'decisions' = only decision changes (default)
+        max_items:    max items to return (default 20)
+    """
+    import time, sqlite3, difflib
+
+    ns        = (args or {}).get('namespace', None)
+    hours     = float((args or {}).get('hours', 24) or 24)
+    mode      = (args or {}).get('mode', 'decisions')
+    max_items = int((args or {}).get('max_items', 20) or 20)
+
+    cutoff = int(time.time()) - int(hours * 3600)
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+
+    result = {
+        'mode': mode,
+        'window': f'last {hours}h',
+        'namespace': ns or 'all',
+        'changes': [],
+    }
+
+    try:
+        con = sqlite3.connect(db)
+        ns_clause = 'AND namespace = ?' if ns else ''
+        ns_params = [ns] if ns else []
+
+        if mode in ('entries', 'decisions'):
+            type_clause = "AND type = 'decision'" if mode == 'decisions' else ''
+            rows = con.execute(f"""
+                SELECT id, namespace, type, title, content,
+                       importance_v2, created_at, status, superseded_by
+                FROM entries
+                WHERE created_at > ? {ns_clause} {type_clause}
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, [cutoff] + ns_params + [max_items]).fetchall()
+
+            now = int(time.time())
+            for row in rows:
+                is_superseded = bool(row[8])
+                result['changes'].append({
+                    'id':         row[0][:8],
+                    'namespace':  row[1],
+                    'type':       row[2],
+                    'title':      (row[3] or '')[:60],
+                    'content':    (row[4] or '')[:150],
+                    'importance': round(float(row[5] or 0.5), 2),
+                    'age_min':    int((now - row[6]) / 60),
+                    'status':     row[7] or 'active',
+                    'superseded': is_superseded,
+                    'change':     'added',
+                })
+
+        elif mode == 'bootstrap':
+            # Compare bootstrap update times and show diffs
+            boot_rows = con.execute(
+                "SELECT namespace, summary, updated_at FROM bootstrap ORDER BY namespace"
+            ).fetchall()
+            now = int(time.time())
+            for row in boot_rows:
+                if ns and row[0] != ns:
+                    continue
+                age_h = round((now - row[2]) / 3600, 1)
+                summary = row[1] or ''
+                result['changes'].append({
+                    'namespace':  row[0],
+                    'summary':    summary[:300],
+                    'updated_age_hours': age_h,
+                    'fresh':      age_h < 24,
+                    'char_count': len(summary),
+                })
+
+        # Summary
+        result['total'] = len(result['changes'])
+        if result['changes']:
+            result['newest_age_min'] = result['changes'][0].get('age_min', 0)
+            result['oldest_age_min'] = result['changes'][-1].get('age_min', 0)
+
+        con.close()
+        return result
+
+    except Exception as e:
+        return {'error': str(e)}
+
+
 TOOLS = {
+    'session_checkpoint': {
+        'description': 'End-of-session checkpoint: saves done/next/issues to memory + updates PROJECT_STATE.md. Auto-collects git log.',
+        'schema': {'type': 'object', 'properties': {
+            'done':      {'type': 'string',  'description': 'What was accomplished'},
+            'next':      {'type': 'array',   'items': {'type': 'string'}, 'description': 'Next action items'},
+            'issues':    {'type': 'array',   'items': {'type': 'string'}, 'description': 'Unresolved issues'},
+            'namespace': {'type': 'string',  'description': 'Memory namespace (default: mirage-infra)'},
+            'update_md': {'type': 'boolean', 'description': 'Update PROJECT_STATE.md (default: True)'},
+            'git_cwd':   {'type': 'string',  'description': 'Git repo for log collection'},
+            'importance':{'type': 'integer', 'description': '1-5 (default: 4)'},
+        }},
+        'handler': tool_session_checkpoint,
+    },
+    'memory_diff': {
+        'description': 'Show what changed in memory since N hours ago. mode=decisions|entries|bootstrap',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string',  'description': 'Namespace filter (None=all)'},
+            'hours':     {'type': 'number',  'description': 'Lookback window hours (default 24)'},
+            'mode':      {'type': 'string',  'description': 'decisions|entries|bootstrap (default: decisions)'},
+            'max_items': {'type': 'integer', 'description': 'Max items (default 20)'},
+        }},
+        'handler': tool_memory_diff,
+    },
     'active_context': {
         'description': 'One-shot session recovery: returns L0 summaries + top decisions + recent activity + physical TODOs. Call at session start.',
         'schema': {'type': 'object', 'properties': {
