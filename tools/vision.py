@@ -1,3 +1,4 @@
+import time
 """
 tools/vision.py - Vision・AI系ツール
 =======================================

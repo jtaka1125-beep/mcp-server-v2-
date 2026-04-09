@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Logs
+logs/*.log
+logs/*.log.*
+logs/*.json
+
+# Data（既存DBは共有なのでここには置かない）
+data/
+
+# 一時ファイル
+*.tmp
+*.bak

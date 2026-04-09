@@ -1,5 +1,5 @@
-"""
-tools/memory.py - memory系MCPツール（完全版）
+﻿"""
+tools/memory.py - memory邉ｻMCP繝・・繝ｫ・亥ｮ悟・迚茨ｼ・
 """
 import sys
 import os
@@ -21,6 +21,15 @@ _jobs_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 # memory_bootstrap
 # ---------------------------------------------------------------------------
+
+def _safe_int(val, default=3):
+    """Convert LLM importance value to int (handles 'High', 'medium', mojibake, etc)."""
+    try:
+        return max(1, min(5, int(val)))
+    except (TypeError, ValueError):
+        _map = {'low': 1, 'medium': 3, 'normal': 3, 'high': 4, 'critical': 5}
+        return _map.get(str(val).strip().lower(), default)
+
 def tool_memory_bootstrap(args: dict) -> dict:
     ns = (args or {}).get('namespace', 'mirage-infra')
     max_chars = int((args or {}).get('max_chars', 800) or 800)
@@ -103,7 +112,14 @@ def tool_memory_search(args: dict) -> dict:
     query = (args or {}).get('query', '')
     limit = int((args or {}).get('limit', 10) or 10)
     types = (args or {}).get('types', None)
-    return mem.search(ns, query=query, types=types, limit=limit)
+    results = mem.search(ns, query=query, types=types, limit=limit)
+    try:
+        for e in (results.get('results') or results.get('hits') or []):
+            if e.get('id'):
+                mem.touch_entry(e['id'])
+    except Exception:
+        pass
+    return results
 
 # ---------------------------------------------------------------------------
 # memory_search_all (cross-namespace)
@@ -125,7 +141,7 @@ def tool_memory_append_raw(args: dict) -> dict:
     ns         = (args or {}).get('namespace', 'mirage-infra')
     content    = (args or {}).get('content', '')
     role       = (args or {}).get('role', 'user')
-    importance = int((args or {}).get('importance', 3) or 3)
+    importance = _safe_int((args or {}).get('importance', 3), 3)
     tags       = (args or {}).get('tags', [])
     if not content:
         return {'error': 'content required'}
@@ -142,7 +158,7 @@ def tool_memory_append_decision(args: dict) -> dict:
     ns         = (args or {}).get('namespace', 'mirage-infra')
     content    = (args or {}).get('content', '')
     title      = (args or {}).get('title', '')
-    importance = int((args or {}).get('importance', 3) or 3)
+    importance = _safe_int((args or {}).get('importance', 3), 3)
     tags       = (args or {}).get('tags', [])
     if not content:
         return {'error': 'content required'}
@@ -153,7 +169,7 @@ def tool_memory_append_decision(args: dict) -> dict:
     return {'success': True, 'id': entry_id}
 
 # ---------------------------------------------------------------------------
-# memory_decision_auto（LLM抽出）
+# memory_decision_auto・・LM謚ｽ蜃ｺ・・
 # ---------------------------------------------------------------------------
 def tool_memory_decision_auto(args: dict) -> dict:
     ns        = (args or {}).get('namespace', 'mirage-infra')
@@ -195,7 +211,7 @@ def tool_memory_decision_auto(args: dict) -> dict:
         mem.append_entry(
             namespace=ns, type_='decision',
             content=content, title=title,
-            importance=int(item.get('importance', 3)),
+            importance=_safe_int(item.get('importance', 3), 3),
             tags=item.get('tags', []),
         )
         stored += 1
@@ -240,8 +256,930 @@ def tool_memory_freshness(args: dict) -> dict:
         return {'error': str(e)}
 
 # ---------------------------------------------------------------------------
-# ツール登録テーブル
+# 繝・・繝ｫ逋ｻ骭ｲ繝・・繝悶Ν
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# memory_l0 - Wing 繧ｵ繝槭Μ蟶ｸ譎ゅΟ繝ｼ繝・(L0)
+# ---------------------------------------------------------------------------
+def tool_memory_l0(args: dict) -> dict:
+    """L0: Return compact namespace summaries (50-100 tok each).
+    Always-load layer for session initialization.
+    """
+    ns = (args or {}).get('namespace', None)
+    from memory import store as mem
+    return mem.get_l0(namespace=ns)
+
+
+# ---------------------------------------------------------------------------
+# memory_l1 - Salience Top-N (L1)
+# ---------------------------------------------------------------------------
+def tool_memory_l1(args: dict) -> dict:
+    """L1: Return top-N entries by salience score (importance ﾃ・freq ﾃ・recency).
+    Session-start layer, 500-800 tokens total.
+    """
+    ns     = (args or {}).get('namespace', None)
+    top_n  = int((args or {}).get('top_n', 20) or 20)
+    types  = (args or {}).get('types', None)
+    if isinstance(types, str):
+        types = [t.strip() for t in types.split(',')]
+    from memory import store as mem
+    return mem.get_l1(namespace=ns, top_n=top_n, type_filter=types)
+
+
+
+# ---------------------------------------------------------------------------
+# Links 繝・・繝ｫ鄒､ (Phase 3)
+# ---------------------------------------------------------------------------
+def _links_connect():
+    import sqlite3, os
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+    return sqlite3.connect(db)
+
+def tool_memory_link_create(args: dict) -> dict:
+    """Create a typed link between two memory entries."""
+    import uuid, time
+    src  = (args or {}).get('source_id', '')
+    tgt  = (args or {}).get('target_id', '')
+    rel  = (args or {}).get('relation_type', 'related')
+    score = float((args or {}).get('score', 0.8) or 0.8)
+    note = (args or {}).get('note', '')
+    
+    if not src or not tgt:
+        return {'error': 'source_id and target_id required'}
+    if rel not in ('supersedes', 'contradicts', 'supports', 'related'):
+        return {'error': f'invalid relation_type: {rel}. Use: supersedes/contradicts/supports/related'}
+    
+    link_id = str(uuid.uuid4())
+    con = _links_connect()
+    try:
+        con.execute(
+            'INSERT INTO links (id, source_id, target_id, relation_type, score, created_at, note) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?)',
+            (link_id, src, tgt, rel, score, int(time.time()), note)
+        )
+        con.commit()
+        return {'id': link_id, 'source_id': src, 'target_id': tgt,
+                'relation_type': rel, 'score': score}
+    except Exception as e:
+        return {'error': str(e)}
+    finally:
+        con.close()
+
+
+def tool_memory_link_search(args: dict) -> dict:
+    """Get all links for a given entry (both directions)."""
+    entry_id = (args or {}).get('entry_id', '')
+    rel_type = (args or {}).get('relation_type', None)
+    direction = (args or {}).get('direction', 'both')  # 'in', 'out', 'both'
+    
+    if not entry_id:
+        return {'error': 'entry_id required'}
+    
+    con = _links_connect()
+    try:
+        results = []
+        
+        if direction in ('out', 'both'):
+            q = 'SELECT id, source_id, target_id, relation_type, score, note FROM links WHERE source_id = ?'
+            params = [entry_id]
+            if rel_type:
+                q += ' AND relation_type = ?'
+                params.append(rel_type)
+            for row in con.execute(q, params).fetchall():
+                results.append({'id':row[0],'source_id':row[1],'target_id':row[2],
+                                 'relation_type':row[3],'score':row[4],'note':row[5],'direction':'out'})
+        
+        if direction in ('in', 'both'):
+            q = 'SELECT id, source_id, target_id, relation_type, score, note FROM links WHERE target_id = ?'
+            params = [entry_id]
+            if rel_type:
+                q += ' AND relation_type = ?'
+                params.append(rel_type)
+            for row in con.execute(q, params).fetchall():
+                results.append({'id':row[0],'source_id':row[1],'target_id':row[2],
+                                 'relation_type':row[3],'score':row[4],'note':row[5],'direction':'in'})
+        
+        return {'entry_id': entry_id, 'links': results, 'count': len(results)}
+    finally:
+        con.close()
+
+
+def tool_memory_link_traverse(args: dict) -> dict:
+    """Multi-hop traversal: follow links N hops from a starting entry.
+    Useful for 'what was the background for this decision?'
+    """
+    start_id = (args or {}).get('entry_id', '')
+    max_hops  = int((args or {}).get('max_hops', 2) or 2)
+    rel_types = (args or {}).get('relation_types', None)
+    
+    if not start_id:
+        return {'error': 'entry_id required'}
+    
+    max_hops = min(max_hops, 3)  # Safety cap
+    
+    con = _links_connect()
+    try:
+        visited = set()
+        frontier = {start_id}
+        all_nodes = []
+        all_edges = []
+        
+        for hop in range(max_hops):
+            if not frontier:
+                break
+            next_frontier = set()
+            
+            for eid in frontier:
+                if eid in visited:
+                    continue
+                visited.add(eid)
+                
+                # Fetch entry
+                row = con.execute(
+                    'SELECT id, namespace, type, title, content FROM entries WHERE id = ?',
+                    (eid,)
+                ).fetchone()
+                if row:
+                    all_nodes.append({
+                        'id': row[0], 'namespace': row[1], 'type': row[2],
+                        'title': row[3], 'content': (row[4] or '')[:150],
+                        'hop': hop
+                    })
+                
+                # Traverse links
+                q = 'SELECT id, source_id, target_id, relation_type, score FROM links WHERE source_id = ? OR target_id = ?'
+                for lrow in con.execute(q, (eid, eid)).fetchall():
+                    if rel_types and lrow[3] not in rel_types:
+                        continue
+                    all_edges.append({'id':lrow[0],'source':lrow[1],'target':lrow[2],
+                                      'type':lrow[3],'score':lrow[4]})
+                    other = lrow[2] if lrow[1] == eid else lrow[1]
+                    if other not in visited:
+                        next_frontier.add(other)
+            
+            frontier = next_frontier
+        
+        return {
+            'start_id': start_id,
+            'nodes': all_nodes,
+            'edges': all_edges,
+            'hops': max_hops,
+        }
+    finally:
+        con.close()
+
+
+
+# ---------------------------------------------------------------------------
+# memory_consolidate (Phase 4: consolidation)
+# ---------------------------------------------------------------------------
+def tool_memory_consolidate(args: dict) -> dict:
+    """Consolidate high-salience repeated entries into semantic memory.
+    
+    Finds entries with access_count >= threshold and importance_v2 >= threshold,
+    groups by similarity, and asks LLM to synthesize a semantic entry.
+    """
+    import sqlite3, uuid, time, json
+    
+    ns        = (args or {}).get('namespace', 'mirage-vulkan')
+    min_acc   = int((args or {}).get('min_access_count', 3) if (args or {}).get('min_access_count') is not None else 3)
+    min_imp   = float((args or {}).get('min_importance', 0.6) or 0.6)
+    dry_run   = bool((args or {}).get('dry_run', False))
+    max_group = int((args or {}).get('max_group_size', 5) or 5)
+    
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+    con = sqlite3.connect(db)
+    
+    try:
+        # Find consolidation candidates
+        rows = con.execute("""
+            SELECT id, type, title, content, importance_v2, access_count, tags
+            FROM entries
+            WHERE namespace = ?
+              AND COALESCE(access_count, 0) >= ?
+              AND COALESCE(importance_v2, 0.5) >= ?
+              AND (type = 'raw' OR type = 'decision')
+              AND (status IS NULL OR status = 'active')
+              AND id NOT IN (SELECT source_id FROM links WHERE relation_type = 'consolidated_into')
+            ORDER BY importance_v2 * COALESCE(access_count, 0) DESC
+            LIMIT ?
+        """, (ns, min_acc, min_imp, max_group * 3)).fetchall()
+        
+        if not rows:
+            return {'consolidated': 0, 'message': 'No candidates found', 'namespace': ns}
+        
+        candidates = [
+            {'id': r[0], 'type': r[1], 'title': r[2],
+             'content': (r[3] or '')[:300], 'importance_v2': r[4],
+             'access_count': r[5], 'tags': r[6]}
+            for r in rows
+        ]
+        
+        if dry_run:
+            return {'dry_run': True, 'candidates': candidates, 'count': len(candidates)}
+        
+        # Group candidates (simple: take top max_group)
+        group = candidates[:max_group]
+        
+        # Build LLM prompt
+        entries_text = '\n'.join([
+            f"[{i+1}] ({e['type']}) {e['title']}: {e['content']}"
+            for i, e in enumerate(group)
+        ])
+        prompt = f"""莉･荳九・{ns}縺ｮ險俶・繧ｨ繝ｳ繝医Μ{len(group)}莉ｶ繧偵・縺､縺ｮsemantic險俶・縺ｨ縺励※譏・庄縺励※縺上□縺輔＞縲・
+驥崎､・・髢｢騾｣縺吶ｋ諠・ｱ繧堤ｵｱ蜷医＠縲∵悽雉ｪ逧・↑遏･隴倥ｒ謚ｽ蜃ｺ縺励※縺上□縺輔＞縲・
+
+{entries_text}
+
+莉･荳九・JSON蠖｢蠑上〒霑斐＠縺ｦ縺上□縺輔＞・域律譛ｬ隱朧K・・
+{{
+  "title": "邨ｱ蜷亥ｾ後・繧ｿ繧､繝医Ν",
+  "content": "邨ｱ蜷医＆繧後◆蜀・ｮｹ・・00譁・ｭ嶺ｻ･蜀・ｼ・,
+  "tags": ["繧ｿ繧ｰ1", "繧ｿ繧ｰ2"],
+  "importance": 4
+}}"""
+        
+        # Call LLM
+        try:
+            import sys as _sys
+            _sys.path.insert(0, r'C:\MirageWork\mcp-server-v2')
+            import llm
+            raw = llm.call(prompt, purpose='consolidation', max_tokens=400, timeout=30)
+            
+            import re
+            match = re.search(r'\{[^{}]+\}', raw, re.DOTALL)
+            if not match:
+                return {'error': 'LLM returned invalid JSON', 'raw': raw[:200]}
+            data = __import__('json').loads(match.group())
+        except Exception as e:
+            return {'error': f'LLM failed: {e}', 'candidates': [c['id'] for c in group]}
+        
+        # Create semantic entry
+        new_id = str(uuid.uuid4())
+        now = int(time.time())
+        
+        from memory import store as mem_store
+        mem_store.append_entry(
+            namespace=ns,
+            type_='semantic',
+            title=data.get('title', 'Consolidated Memory'),
+            content=data.get('content', ''),
+            tags=data.get('tags', []),
+            importance=data.get('importance', 4),
+            role='system',
+        )
+        
+        # Find the just-created entry
+        row = con.execute(
+            "SELECT id FROM entries WHERE namespace=? AND type='semantic' ORDER BY created_at DESC LIMIT 1",
+            (ns,)
+        ).fetchone()
+        if row:
+            new_id = row[0]
+        
+        # Create 'consolidated_into' links
+        consolidated = []
+        for e in group:
+            link_id = str(uuid.uuid4())
+            con.execute(
+                'INSERT INTO links (id, source_id, target_id, relation_type, score, created_at, note) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (link_id, e['id'], new_id, 'consolidated_into', 1.0, now, 'auto-consolidated')
+            )
+            # Lower original entry importance_v2 (already represented in semantic)
+            con.execute(
+                'UPDATE entries SET importance_v2 = importance_v2 * 0.5 WHERE id = ?',
+                (e['id'],)
+            )
+            consolidated.append(e['id'])
+        
+        con.commit()
+        
+        return {
+            'consolidated': len(consolidated),
+            'semantic_entry_id': new_id,
+            'semantic_title': data.get('title'),
+            'source_ids': consolidated,
+            'namespace': ns,
+        }
+    finally:
+        con.close()
+
+
+
+# ---------------------------------------------------------------------------
+# memory_ingest (karpathy LLM Wiki - Ingest フロー)
+# ---------------------------------------------------------------------------
+def tool_memory_ingest(args: dict) -> dict:
+    """Ingest a new entry and auto-generate cross-reference links.
+    
+    Workflow (karpathy LLM Wiki pattern):
+    1. Write new entry to DB
+    2. FTS search for related existing entries  
+    3. LLM judges relation type for each candidate
+    4. Auto-create links for matches
+    5. Assign room_id if not specified
+    
+    Args:
+        namespace, type, title, content, tags, importance: same as memory_append_raw
+        room_id: optional, auto-assigned if omitted
+        auto_link: bool (default True) - run cross-reference generation
+        max_candidates: int (default 5) - max entries to check for links
+    """
+    import sqlite3, uuid, time, json
+    
+    ns          = (args or {}).get('namespace', 'mirage-infra')
+    etype       = (args or {}).get('type', 'raw')
+    title       = (args or {}).get('title', '')
+    content     = (args or {}).get('content', '')
+    tags        = (args or {}).get('tags', [])
+    importance  = int((args or {}).get('importance', 3) or 3)
+    room_id     = (args or {}).get('room_id', None)
+    auto_link   = bool((args or {}).get('auto_link', True))
+    max_cands   = int((args or {}).get('max_candidates', 5) or 5)
+    
+    if not content:
+        return {'error': 'content required'}
+    
+    # 1. Write entry
+    from memory import store as mem_store
+    mem_store.append_entry(
+        namespace=ns, type_=etype, title=title,
+        content=content, tags=tags, importance=importance, role='user',
+    )
+    
+    # Find the new entry id
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+    con = sqlite3.connect(db)
+    try:
+        new_row = con.execute(
+            "SELECT id FROM entries WHERE namespace=? ORDER BY created_at DESC LIMIT 1",
+            (ns,)
+        ).fetchone()
+        if not new_row:
+            return {'error': 'entry not found after insert'}
+        new_id = new_row[0]
+        
+        # 2. Assign room_id
+        if not room_id:
+            room_id = f'{ns}:general'
+        con.execute("UPDATE entries SET room_id=? WHERE id=?", (room_id, new_id))
+        con.commit()
+        
+        links_created = []
+        
+        if auto_link and content.strip():
+            # 3. FTS search for related entries
+            search_query = ' '.join((title + ' ' + content)[:200].split()[:10])
+            candidates = mem_store.search(ns, query=search_query, limit=max_cands * 2)
+            hits = [h for h in candidates.get('hits', []) if h.get('id') != new_id][:max_cands]
+            
+            if hits:
+                # 4. LLM judges relations
+                cand_text = '\n'.join([
+                    f"[{i+1}] id={h['id'][:8]} type={h.get('type','')} "
+                    f"title={h.get('title','')[:40]}: {str(h.get('snippet',''))[:80]}"
+                    for i, h in enumerate(hits)
+                ])
+                
+                prompt = f"""新しいエントリとの関係を判定してください。
+
+新エントリ: {title or content[:100]}
+
+候補エントリ:
+{cand_text}
+
+各候補について以下のJSONリストで返してください（関係なしは省略可）:
+[
+  {{"index": 1, "relation": "supports|contradicts|related|supersedes", "score": 0.0-1.0}},
+  ...
+]
+関係のない候補は含めないでください。JSONのみ返してください。"""
+                
+                try:
+                    import sys as _sys
+                    _sys.path.insert(0, r'C:\MirageWork\mcp-server-v2')
+                    import llm
+                    raw = llm.call(prompt, purpose='ingest_link', max_tokens=300, timeout=20)
+                    
+                    import re
+                    match = re.search(r'\[.*?\]', raw, re.DOTALL)
+                    if match:
+                        relations = json.loads(match.group())
+                        now = int(time.time())
+                        for rel in relations:
+                            idx = rel.get('index', 0) - 1
+                            if 0 <= idx < len(hits):
+                                target_id = hits[idx]['id']
+                                rel_type = rel.get('relation', 'related')
+                                if rel_type not in ('supports','contradicts','related','supersedes'):
+                                    rel_type = 'related'
+                                score = float(rel.get('score', 0.7))
+                                link_id = str(uuid.uuid4())
+                                con.execute(
+                                    'INSERT INTO links (id, source_id, target_id, relation_type, score, created_at, note) '
+                                    'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                    (link_id, new_id, target_id, rel_type, score, now, 'auto-ingest')
+                                )
+                                links_created.append({
+                                    'target_id': target_id[:8],
+                                    'relation': rel_type,
+                                    'score': score
+                                })
+                        con.commit()
+                except Exception as e:
+                    # LLM failure is non-fatal
+                    links_created.append({'error': str(e)[:60]})
+        
+        return {
+            'entry_id': new_id,
+            'room_id': room_id,
+            'links_created': len([l for l in links_created if 'error' not in l]),
+            'links': links_created,
+        }
+    finally:
+        con.close()
+
+
+
+# ---------------------------------------------------------------------------
+# memory_lint (karpathy LLM Wiki - Lint 操作)
+# ---------------------------------------------------------------------------
+def tool_memory_lint(args: dict) -> dict:
+    """Health-check the memory wiki.
+    
+    Detects:
+    - Orphan entries: no links in or out
+    - Stale decisions: decision type, older than threshold, no supersedes
+    - Contradiction candidates: entries with 'contradicts' links
+    - Low-importance clusters: many entries with importance_v2 < 0.3
+    - Namespace imbalance: namespaces with no recent entries
+    
+    Returns a lint report with actionable suggestions.
+    """
+    import sqlite3, time
+    
+    ns          = (args or {}).get('namespace', None)
+    stale_days  = int((args or {}).get('stale_days', 30) or 30)
+    
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+    con = sqlite3.connect(db)
+    report = {'issues': [], 'stats': {}, 'suggestions': []}
+    
+    try:
+        now = int(time.time())
+        stale_ts = now - stale_days * 86400
+        
+        ns_filter = "AND namespace = ?" if ns else ""
+        ns_params = [ns] if ns else []
+        
+        # --- 1. Orphan entries (no links) ---
+        orphan_q = f"""
+            SELECT id, namespace, type, title, created_at
+            FROM entries
+            WHERE id NOT IN (SELECT source_id FROM links)
+              AND id NOT IN (SELECT target_id FROM links)
+              AND (status IS NULL OR status != 'archived')
+              {ns_filter}
+            LIMIT 20
+        """
+        orphans = con.execute(orphan_q, ns_params).fetchall()
+        # Only flag decision/fact type orphans as issues
+        orphan_issues = [r for r in orphans if r[2] in ('decision', 'fact', 'semantic')]
+        if orphan_issues:
+            report['issues'].append({
+                'type': 'orphan',
+                'count': len(orphan_issues),
+                'sample': [{'id': r[0][:8], 'ns': r[1], 'type': r[2],
+                            'title': (r[3] or '')[:40]} for r in orphan_issues[:5]],
+                'description': f'{len(orphan_issues)} decision/fact/semantic entries with no links'
+            })
+        
+        # --- 2. Stale decisions ---
+        stale_q = f"""
+            SELECT id, namespace, title, created_at, importance_v2
+            FROM entries
+            WHERE type = 'decision'
+              AND created_at < ?
+              AND id NOT IN (SELECT source_id FROM links WHERE relation_type = 'supersedes')
+              AND (status IS NULL OR status = 'active')
+              {ns_filter}
+            ORDER BY created_at ASC
+            LIMIT 10
+        """
+        stale = con.execute(stale_q, [stale_ts] + ns_params).fetchall()
+        if stale:
+            report['issues'].append({
+                'type': 'stale_decision',
+                'count': len(stale),
+                'sample': [{'id': r[0][:8], 'ns': r[1], 'title': (r[2] or '')[:40],
+                            'age_days': int((now - r[3]) / 86400)} for r in stale[:5]],
+                'description': f'{len(stale)} decisions older than {stale_days}d with no supersedes link'
+            })
+        
+        # --- 3. Contradiction pairs ---
+        contrad = con.execute("""
+            SELECT l.source_id, l.target_id, l.score,
+                   e1.title, e2.title, e1.namespace
+            FROM links l
+            JOIN entries e1 ON l.source_id = e1.id
+            JOIN entries e2 ON l.target_id = e2.id
+            WHERE l.relation_type = 'contradicts'
+            LIMIT 10
+        """).fetchall()
+        if contrad:
+            report['issues'].append({
+                'type': 'contradiction',
+                'count': len(contrad),
+                'sample': [{'src': r[0][:8], 'tgt': r[1][:8], 'score': r[2],
+                            'src_title': (r[3] or '')[:30],
+                            'tgt_title': (r[4] or '')[:30]} for r in contrad[:3]],
+                'description': f'{len(contrad)} contradiction links need resolution'
+            })
+        
+        # --- 4. Low salience mass ---
+        low_q = f"""
+            SELECT namespace, COUNT(*) as cnt
+            FROM entries
+            WHERE COALESCE(importance_v2, 0.5) < 0.3
+              AND (status IS NULL OR status != 'archived')
+              {ns_filter}
+            GROUP BY namespace
+            ORDER BY cnt DESC
+        """
+        low_imp = con.execute(low_q, ns_params).fetchall()
+        if any(r[1] > 20 for r in low_imp):
+            report['issues'].append({
+                'type': 'low_salience_mass',
+                'by_namespace': [{'ns': r[0], 'count': r[1]} for r in low_imp if r[1] > 20],
+                'description': 'Large number of low-importance entries, consider archiving or consolidating'
+            })
+        
+        # --- 5. Bootstrap staleness ---
+        boot_rows = con.execute(
+            "SELECT namespace, updated_at FROM bootstrap ORDER BY updated_at ASC LIMIT 5"
+        ).fetchall()
+        stale_boots = [(r[0], int((now - r[1]) / 3600)) for r in boot_rows
+                       if (now - r[1]) > 7 * 86400]
+        if stale_boots:
+            report['issues'].append({
+                'type': 'stale_bootstrap',
+                'namespaces': [{'ns': r[0], 'age_hours': r[1]} for r in stale_boots],
+                'description': 'Bootstrap summaries older than 7 days, run memory_compact'
+            })
+        
+        # --- Stats ---
+        total = con.execute(
+            f"SELECT COUNT(*) FROM entries WHERE 1=1 {ns_filter}", ns_params
+        ).fetchone()[0]
+        link_count = con.execute("SELECT COUNT(*) FROM links").fetchone()[0]
+        semantic_count = con.execute(
+            f"SELECT COUNT(*) FROM entries WHERE type='semantic' {ns_filter}", ns_params
+        ).fetchone()[0]
+        
+        report['stats'] = {
+            'total_entries': total,
+            'total_links': link_count,
+            'semantic_entries': semantic_count,
+            'orphan_decisions': len(orphan_issues),
+            'stale_decisions': len(stale),
+            'contradictions': len(contrad),
+        }
+        
+        # --- Suggestions ---
+        if stale_boots:
+            report['suggestions'].append(
+                f"Run memory_compact for: {[r[0] for r in stale_boots]}"
+            )
+        if len(stale) > 0:
+            report['suggestions'].append(
+                f"Review {len(stale)} stale decisions - supersede or archive outdated ones"
+            )
+        if semantic_count == 0:
+            report['suggestions'].append(
+                "No semantic entries yet - run memory_consolidate to synthesize repeated knowledge"
+            )
+        if link_count < 10:
+            report['suggestions'].append(
+                "Few links - use memory_ingest for new entries to auto-generate cross-references"
+            )
+        
+        report['namespace'] = ns or 'all'
+        report['issue_count'] = len(report['issues'])
+        return report
+    finally:
+        con.close()
+
+
+
+# ---------------------------------------------------------------------------
+# memory_wikify (karpathy LLM Wiki - 答えの書き戻し)
+# ---------------------------------------------------------------------------
+def tool_memory_wikify(args: dict) -> dict:
+    """File back a valuable Q&A or analysis as a wiki entry.
+    
+    karpathy: "good answers can be filed back into the wiki as new pages.
+    A comparison you asked for, an analysis, a connection you discovered
+    -- these are valuable and shouldn't disappear into chat history."
+    
+    Creates a 'semantic' or 'fact' type entry from the provided Q&A,
+    then runs ingest cross-reference linking.
+    
+    Args:
+        question:   The question that was asked
+        answer:     The answer/analysis to preserve
+        namespace:  Target namespace
+        title:      Optional title (LLM generates if omitted)
+        tags:       Optional tags
+        importance: 1-5 (default 4, since wikified content is valuable)
+        room_id:    Optional room
+    """
+    import sqlite3, time, json, uuid
+    
+    question  = (args or {}).get('question', '')
+    answer    = (args or {}).get('answer', '')
+    ns        = (args or {}).get('namespace', 'mirage-infra')
+    title     = (args or {}).get('title', '')
+    tags      = (args or {}).get('tags', [])
+    importance = int((args or {}).get('importance', 4) or 4)
+    room_id   = (args or {}).get('room_id', None)
+    
+    if not answer:
+        return {'error': 'answer required'}
+    
+    # Auto-generate title if not provided
+    if not title:
+        if question:
+            title = question[:60] + ('...' if len(question) > 60 else '')
+        else:
+            title = answer[:60] + ('...' if len(answer) > 60 else '')
+    
+    # Format content as Q&A wiki page
+    if question:
+        content = "Q: " + question + "\n\nA: " + answer
+    else:
+        content = answer
+    
+    # Use memory_ingest for auto cross-reference
+    ingest_result = tool_memory_ingest({
+        'namespace': ns,
+        'type': 'semantic',
+        'title': title,
+        'content': content,
+        'tags': tags or ['wikified', 'qa'],
+        'importance': importance,
+        'room_id': room_id or f'{ns}:general',
+        'auto_link': True,
+        'max_candidates': 5,
+    })
+    
+    return {
+        'entry_id': ingest_result.get('entry_id'),
+        'title': title,
+        'namespace': ns,
+        'links_created': ingest_result.get('links_created', 0),
+        'message': 'Filed to wiki as semantic entry with cross-references',
+    }
+
+
+
+# ---------------------------------------------------------------------------
+# memory_archive (C2 + E1: archival + size management)
+# ---------------------------------------------------------------------------
+def tool_memory_archive(args: dict) -> dict:
+    """Archive old low-salience entries and manage DB size.
+    
+    C2 policy:
+      - type=raw, age > stale_days, importance_v2 < imp_threshold, access_count=0 → archived
+      - type=decision, age > decision_days, importance_v2 < 0.3, access_count=0 → archived
+    
+    E1 policy:
+      - If DB > size_threshold_mb, permanently delete oldest archived entries
+        until under threshold (keeps N most recent archived for audit)
+    
+    Args:
+        stale_days:       raw entries older than N days (default 90)
+        decision_days:    decision entries older than N days (default 180)
+        imp_threshold:    importance_v2 < X to archive (default 0.3)
+        size_threshold_mb: DB size limit in MB (default 50)
+        keep_archived_n:  keep N most recent archived entries (default 500)
+        dry_run:          bool, default False
+        namespace:        optional filter
+    """
+    import sqlite3, time, os as _os
+    
+    stale_days   = int((args or {}).get('stale_days', 90) or 90)
+    dec_days     = int((args or {}).get('decision_days', 180) or 180)
+    imp_thresh   = float((args or {}).get('imp_threshold', 0.3) or 0.3)
+    size_mb      = float((args or {}).get('size_threshold_mb', 50) or 50)
+    keep_n       = int((args or {}).get('keep_archived_n', 500) or 500)
+    dry_run      = bool((args or {}).get('dry_run', False))
+    ns           = (args or {}).get('namespace', None)
+    
+    db = r'C:\MirageWork\mcp-server\data\memory.db'
+    con = sqlite3.connect(db)
+    now = int(time.time())
+    report = {'archived': 0, 'deleted': 0, 'db_size_mb': 0, 'dry_run': dry_run}
+    
+    try:
+        ns_clause = 'AND namespace = ?' if ns else ''
+        ns_params = [ns] if ns else []
+        
+        # C2a: Archive old raw
+        raw_ts = now - stale_days * 86400
+        if dry_run:
+            n = con.execute(f"""
+                SELECT COUNT(*) FROM entries
+                WHERE type='raw' AND created_at < ?
+                  AND COALESCE(importance_v2,0.5) < ?
+                  AND (status IS NULL OR status='active')
+                  AND COALESCE(access_count,0) = 0
+                  {ns_clause}
+            """, [raw_ts, imp_thresh] + ns_params).fetchone()[0]
+            report['would_archive_raw'] = n
+        else:
+            r = con.execute(f"""
+                UPDATE entries SET status='archived'
+                WHERE type='raw' AND created_at < ?
+                  AND COALESCE(importance_v2,0.5) < ?
+                  AND (status IS NULL OR status='active')
+                  AND COALESCE(access_count,0) = 0
+                  {ns_clause}
+            """, [raw_ts, imp_thresh] + ns_params)
+            report['archived'] += r.rowcount
+        
+        # C2b: Archive old low-importance decisions
+        dec_ts = now - dec_days * 86400
+        if dry_run:
+            n = con.execute(f"""
+                SELECT COUNT(*) FROM entries
+                WHERE type='decision' AND created_at < ?
+                  AND COALESCE(importance_v2,0.5) < 0.3
+                  AND (status IS NULL OR status='active')
+                  AND COALESCE(access_count,0) = 0
+                  {ns_clause}
+            """, [dec_ts] + ns_params).fetchone()[0]
+            report['would_archive_decisions'] = n
+        else:
+            r = con.execute(f"""
+                UPDATE entries SET status='archived'
+                WHERE type='decision' AND created_at < ?
+                  AND COALESCE(importance_v2,0.5) < 0.3
+                  AND (status IS NULL OR status='active')
+                  AND COALESCE(access_count,0) = 0
+                  {ns_clause}
+            """, [dec_ts] + ns_params)
+            report['archived'] += r.rowcount
+        
+        if not dry_run:
+            con.commit()
+        
+        # E1: DB size check and purge
+        db_size_mb = _os.path.getsize(db) / 1024 / 1024
+        report['db_size_mb'] = round(db_size_mb, 1)
+        
+        if db_size_mb > size_mb and not dry_run:
+            # Delete oldest archived entries, keep keep_n most recent
+            archived_ids = con.execute("""
+                SELECT id FROM entries WHERE status='archived'
+                ORDER BY updated_at DESC
+            """).fetchall()
+            
+            to_delete = archived_ids[keep_n:]
+            if to_delete:
+                ids = [r[0] for r in to_delete]
+                placeholders = ','.join('?' * len(ids))
+                con.execute(f"DELETE FROM entries WHERE id IN ({placeholders})", ids)
+                con.execute(f"DELETE FROM links WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})", ids + ids)
+                con.commit()
+                # VACUUM to reclaim space
+                con.execute('VACUUM')
+                report['deleted'] = len(to_delete)
+                report['db_size_after_mb'] = round(_os.path.getsize(db)/1024/1024, 1)
+        
+        report['active_count'] = con.execute(
+            "SELECT COUNT(*) FROM entries WHERE status IS NULL OR status='active'"
+        ).fetchone()[0]
+        report['archived_count'] = con.execute(
+            "SELECT COUNT(*) FROM entries WHERE status='archived'"
+        ).fetchone()[0]
+        
+        return report
+    finally:
+        con.close()
+
+
+
+# ---------------------------------------------------------------------------
+# memory_semantic_search (A1: Semantic Search via LLM re-ranking)
+# ---------------------------------------------------------------------------
+def tool_memory_semantic_search(args: dict) -> dict:
+    """Semantic search: FTS candidates + LLM re-ranking for conceptual match.
+    
+    No heavy deps (no faiss/sentence_transformers).
+    Uses Cerebras qwen-3-235b to score relevance between query and candidates.
+    Falls back to FTS results if LLM unavailable.
+    
+    Args:
+        query:      Natural language query
+        namespace:  Optional namespace filter
+        limit:      Number of results (default 5)
+        types:      Optional type filter list
+        use_llm:    bool (default True) - enable LLM re-ranking
+        fts_mult:   int (default 4) - FTS candidates = limit * fts_mult
+    """
+    import json as _json
+    
+    query    = (args or {}).get('query', '')
+    ns       = (args or {}).get('namespace', None)
+    limit    = int((args or {}).get('limit', 5) or 5)
+    types    = (args or {}).get('types', None)
+    use_llm  = bool((args or {}).get('use_llm', True))
+    fts_mult = int((args or {}).get('fts_mult', 4) or 4)
+    
+    if not query:
+        return {'error': 'query required'}
+    
+    from memory import store as mem_store
+    
+    # Step 1: FTS to get candidates
+    fts_limit = min(limit * fts_mult, 40)
+    if ns:
+        raw = mem_store.search(ns, query=query, types=types, limit=fts_limit)
+    else:
+        raw = mem_store.search_all(query=query, types=types, limit=fts_limit)
+    
+    candidates = raw.get('hits', [])
+    
+    if not candidates or not use_llm or len(candidates) <= limit:
+        return {
+            'hits': candidates[:limit],
+            'method': 'fts_only',
+            'total_candidates': len(candidates),
+        }
+    
+    # Step 2: LLM re-ranking
+    try:
+        import sys as _sys
+        _sys.path.insert(0, r'C:\MirageWork\mcp-server-v2')
+        import llm
+        
+        cand_text = '\n'.join([
+            f"[{i+1}] type={c.get('type','')} ns={c.get('namespace','')} "
+            f"title={c.get('title','')[:40]}: {str(c.get('snippet') or c.get('content',''))[:80]}"
+            for i, c in enumerate(candidates)
+        ])
+        
+        prompt = f"""Rate each candidate's semantic relevance to the query.
+
+Query: {query}
+
+Candidates:
+{cand_text}
+
+Return ONLY a JSON array of indices (1-based) sorted by relevance, most relevant first.
+Include only the top {limit} indices.
+Example: [3, 1, 5, 2, 4]
+JSON only, no explanation."""
+        
+        raw_resp = llm.call(prompt, purpose='semantic_search', max_tokens=100, timeout=15)
+        
+        import re
+        match = re.search(r'\[[\d,\s]+\]', raw_resp)
+        if match:
+            indices = _json.loads(match.group())
+            reranked = []
+            for idx in indices:
+                if 1 <= idx <= len(candidates):
+                    hit = candidates[idx-1].copy()
+                    hit['semantic_rank'] = len(reranked) + 1
+                    reranked.append(hit)
+                if len(reranked) >= limit:
+                    break
+            
+            # Fill remaining with FTS order if needed
+            seen_ids = {h['id'] for h in reranked}
+            for c in candidates:
+                if c['id'] not in seen_ids and len(reranked) < limit:
+                    reranked.append(c)
+            
+            return {
+                'hits': reranked,
+                'method': 'semantic_llm_rerank',
+                'total_candidates': len(candidates),
+                'model': 'qwen-3-235b',
+            }
+    except Exception as e:
+        pass  # Degrade to FTS gracefully
+    
+    return {
+        'hits': candidates[:limit],
+        'method': 'fts_fallback',
+        'total_candidates': len(candidates),
+    }
+
+
 TOOLS = {
     'memory_bootstrap': {
         'description': 'Get bootstrap summary for a namespace.',
@@ -339,4 +1277,138 @@ TOOLS = {
         }},
         'handler': tool_memory_freshness,
     },
+    'memory_l0': {
+        'description': 'L0: compact namespace summaries, always-load layer (50-100 tok)',
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'namespace': {'type': 'string', 'description': 'Filter by namespace'},
+            }
+        },
+        'handler': tool_memory_l0,
+    },
+    'memory_l1': {
+        'description': 'L1: top-N entries by salience (importance x freq x recency), session-start layer',
+        'schema': {
+            'type': 'object',
+            'properties': {
+                'namespace': {'type': 'string'},
+                'top_n':     {'type': 'integer', 'description': 'Number of entries (default 20)'},
+                'types':     {'type': 'string',  'description': 'Comma-separated type filter'},
+            }
+        },
+        'handler': tool_memory_l1,
+    },
+
+    'memory_link_create': {
+        'description': 'Create typed link between entries (supersedes/contradicts/supports/related)',
+        'schema': {'type':'object','properties':{
+            'source_id':     {'type':'string'},
+            'target_id':     {'type':'string'},
+            'relation_type': {'type':'string'},
+            'score':         {'type':'number'},
+            'note':          {'type':'string'},
+        }},
+        'handler': tool_memory_link_create,
+    },
+    'memory_link_search': {
+        'description': 'Get links for an entry (in/out/both directions)',
+        'schema': {'type':'object','properties':{
+            'entry_id':      {'type':'string'},
+            'relation_type': {'type':'string'},
+            'direction':     {'type':'string'},
+        }},
+        'handler': tool_memory_link_search,
+    },
+    'memory_link_traverse': {
+        'description': 'Multi-hop traversal: follow links N hops from starting entry',
+        'schema': {'type':'object','properties':{
+            'entry_id':     {'type':'string'},
+            'max_hops':     {'type':'integer'},
+            'relation_types': {'type':'string'},
+        }},
+        'handler': tool_memory_link_traverse,
+    },
+
+    'memory_consolidate': {
+        'description': 'Consolidate high-salience repeated entries into semantic memory (Phase 4)',
+        'schema': {'type':'object','properties':{
+            'namespace':      {'type':'string'},
+            'min_access_count': {'type':'integer', 'description': 'min access count threshold (default 3)'},
+            'min_importance': {'type':'number', 'description': 'min importance_v2 threshold (default 0.6)'},
+            'dry_run':        {'type':'boolean', 'description': 'list candidates without executing'},
+            'max_group_size': {'type':'integer', 'description': 'max entries to consolidate at once (default 5)'},
+        }},
+        'handler': tool_memory_consolidate,
+    },
+
+    'memory_ingest': {
+        'description': 'Ingest new entry with auto cross-reference link generation (karpathy LLM Wiki pattern)',
+        'schema': {'type': 'object', 'properties': {
+            'namespace':      {'type': 'string'},
+            'type':           {'type': 'string'},
+            'title':          {'type': 'string'},
+            'content':        {'type': 'string'},
+            'tags':           {'type': 'array', 'items': {'type': 'string'}},
+            'importance':     {'type': 'integer'},
+            'room_id':        {'type': 'string'},
+            'auto_link':      {'type': 'boolean'},
+            'max_candidates': {'type': 'integer'},
+        }},
+        'handler': tool_memory_ingest,
+    },
+
+    'memory_lint': {
+        'description': 'Health-check: detect orphans, stale decisions, contradictions, low-salience mass (karpathy LLM Wiki lint)',
+        'schema': {'type': 'object', 'properties': {
+            'namespace':  {'type': 'string', 'description': 'Filter by namespace (omit for all)'},
+            'stale_days': {'type': 'integer', 'description': 'Decisions older than N days are flagged (default 30)'},
+        }},
+        'handler': tool_memory_lint,
+    },
+
+    'memory_wikify': {
+        'description': 'File back a Q&A or analysis as a permanent wiki entry with auto cross-reference (karpathy LLM Wiki write-back)',
+        'schema': {'type': 'object', 'properties': {
+            'question':   {'type': 'string'},
+            'answer':     {'type': 'string'},
+            'namespace':  {'type': 'string'},
+            'title':      {'type': 'string'},
+            'tags':       {'type': 'array', 'items': {'type': 'string'}},
+            'importance': {'type': 'integer'},
+            'room_id':    {'type': 'string'},
+        }},
+        'handler': tool_memory_wikify,
+    },
+
+    'memory_archive': {
+        'description': 'C2+E1: Archive old low-salience entries and manage DB size automatically',
+        'schema': {'type': 'object', 'properties': {
+            'stale_days':        {'type': 'integer', 'description': 'raw entries older than N days (default 90)'},
+            'decision_days':     {'type': 'integer', 'description': 'decision entries older than N days (default 180)'},
+            'imp_threshold':     {'type': 'number',  'description': 'importance_v2 threshold (default 0.3)'},
+            'size_threshold_mb': {'type': 'number',  'description': 'DB size limit MB (default 50)'},
+            'keep_archived_n':   {'type': 'integer', 'description': 'keep N recent archived entries (default 500)'},
+            'dry_run':           {'type': 'boolean'},
+            'namespace':         {'type': 'string'},
+        }},
+        'handler': tool_memory_archive,
+    },
+
+    'memory_semantic_search': {
+        'description': 'A1: Semantic search via FTS + LLM re-ranking (no heavy deps, falls back gracefully)',
+        'schema': {'type': 'object', 'properties': {
+            'query':     {'type': 'string'},
+            'namespace': {'type': 'string'},
+            'limit':     {'type': 'integer'},
+            'types':     {'type': 'array', 'items': {'type': 'string'}},
+            'use_llm':   {'type': 'boolean'},
+            'fts_mult':  {'type': 'integer', 'description': 'FTS candidates = limit * fts_mult (default 4)'},
+        }},
+        'handler': tool_memory_semantic_search,
+    },
+
 }
+
+# test
+
