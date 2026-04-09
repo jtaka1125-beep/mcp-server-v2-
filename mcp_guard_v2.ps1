@@ -1,6 +1,6 @@
-# mcp_guard_v2.ps1 - mcp-server-v2 watchdog (v3 - heartbeat file check)
-# Invoke-WebRequest は SYSTEM コンテキストで不安定なため
-# V2 が書くハートビートファイルで生死判定する
+﻿# mcp_guard_v2.ps1 - mcp-server-v2 watchdog (v3 - heartbeat file check)
+# Invoke-WebRequest 縺ｯ SYSTEM 繧ｳ繝ｳ繝・く繧ｹ繝医〒荳榊ｮ牙ｮ壹↑縺溘ａ
+# V2 縺梧嶌縺上ワ繝ｼ繝医ン繝ｼ繝医ヵ繧｡繧､繝ｫ縺ｧ逕滓ｭｻ蛻､螳壹☆繧・
 
 $PORT      = 3001
 $SCRIPT    = "C:\MirageWork\mcp-server-v2\server.py"
@@ -16,23 +16,23 @@ function Write-Log($msg) {
 }
 
 function Test-ServerAlive {
-    # 1. PIDファイルが存在し、プロセスが生きているか確認
+    # 1. PID繝輔ぃ繧､繝ｫ縺悟ｭ伜惠縺励√・繝ｭ繧ｻ繧ｹ縺檎函縺阪※縺・ｋ縺狗｢ｺ隱・
     if (-not (Test-Path $PIDFILE)) { return $false }
     $pidVal = Get-Content $PIDFILE -ErrorAction SilentlyContinue
     if (-not ($pidVal -match '^\d+$')) { return $false }
     $proc = Get-Process -Id ([int]$pidVal) -ErrorAction SilentlyContinue
     if (-not $proc) { return $false }
 
-    # 2. ハートビートファイルが 60 秒以内に更新されているか
+    # 2. 繝上・繝医ン繝ｼ繝医ヵ繧｡繧､繝ｫ縺・60 遘剃ｻ･蜀・↓譖ｴ譁ｰ縺輔ｌ縺ｦ縺・ｋ縺・
     if (Test-Path $HEARTBEAT) {
         $age = (Get-Date) - (Get-Item $HEARTBEAT).LastWriteTime
         if ($age.TotalSeconds -lt 60) { return $true }
-        # ハートビートが古い → ゾンビプロセスの可能性
+        # 繝上・繝医ン繝ｼ繝医′蜿､縺・竊・繧ｾ繝ｳ繝薙・繝ｭ繧ｻ繧ｹ縺ｮ蜿ｯ閭ｽ諤ｧ
         Write-Log "WARN: heartbeat stale ($([int]$age.TotalSeconds)s old)"
         return $false
     }
 
-    # ハートビートファイルなし → 起動直後かもしれないのでプロセスだけで判定
+    # 繝上・繝医ン繝ｼ繝医ヵ繧｡繧､繝ｫ縺ｪ縺・竊・襍ｷ蜍慕峩蠕後°繧ゅ＠繧後↑縺・・縺ｧ繝励Ο繧ｻ繧ｹ縺縺代〒蛻､螳・
     return $true
 }
 
@@ -46,7 +46,7 @@ function Kill-V2 {
         Remove-Item $PIDFILE -Force -ErrorAction SilentlyContinue
     }
     Remove-Item $HEARTBEAT -Force -ErrorAction SilentlyContinue
-    # netstat でも念のり
+    # netstat 縺ｧ繧ょｿｵ縺ｮ繧・
     $lines = netstat -ano 2>$null | Select-String ":$PORT\s" | Where-Object { $_ -match 'LISTENING' }
     foreach ($line in $lines) {
         $pid2 = ($line.ToString().Trim() -split '\s+')[-1]
@@ -70,8 +70,8 @@ function Start-V2Server {
     } catch {}
     $p = Start-Process $PYTHON -ArgumentList $SCRIPT -WorkingDirectory $WORKDIR -WindowStyle Hidden -PassThru
     Write-Log "Started V2 PID $($p.Id)"
-    # 最大 20 秒待機（PIDファイルが書かれるまで）
-    for ($i = 0; $i -lt 20; $i++) {
+    # 譛螟ｧ 20 遘貞ｾ・ｩ滂ｼ・ID繝輔ぃ繧､繝ｫ縺梧嶌縺九ｌ繧九∪縺ｧ・・
+    for ($i = 0; $i -lt 180; $i++) {
         Start-Sleep 1
         if (Test-Path $PIDFILE) {
             $pf = Get-Content $PIDFILE -ErrorAction SilentlyContinue
