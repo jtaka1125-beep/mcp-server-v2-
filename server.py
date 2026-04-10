@@ -1,4 +1,4 @@
-"""
+﻿"""
 server.py - MCPプロトコル薄い層
 =================================
 ここはプロトコルの橋渡しだけ。ビジネスロジックは各tools/*.pyに。
@@ -228,11 +228,11 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._send_json(500, {'error': str(e)})
 
     def _proxy_api_get(self, path: str):
-        """Forward GET /api/* to legacy mcp-server at port 3000"""
-        import urllib.request
+        """Forward GET /api/* to V1. V1 落ちたら V2 自身で応答する"""
+        import urllib.request, json as _json
         legacy_url = 'http://localhost:3000'
         try:
-            with urllib.request.urlopen(f'{legacy_url}{path}', timeout=10) as resp:
+            with urllib.request.urlopen(f'{legacy_url}{path}', timeout=5) as resp:
                 data = resp.read()
                 self.send_response(200)
                 ct = resp.headers.get('Content-Type', 'application/json')
@@ -240,10 +240,47 @@ class MCPHandler(BaseHTTPRequestHandler):
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(data)
-        except Exception as e:
-            self._send_json(502, {'error': str(e)})
+        except Exception:
+            # V1 落ちてる -> V2 自身で /api/* に応答する
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            try:
+                import psutil
+                mem = psutil.Process().memory_percent()
+                cpu = psutil.Process().cpu_percent()
+            except Exception:
+                mem = cpu = 0.0
+            body = _json.dumps({
+                'server_v2': 'running',
+                'port': PORT_NEW,
+                'cpu_percent': cpu,
+                'memory_percent': mem,
+                'uptime_sec': 0,
+                'server_v1': 'unreachable',
+                'v1_fallback': True,
+            }).encode()
+            self.wfile.write(body)
 
     def do_POST(self):
+        # Handle /restart endpoint
+        if self.path == '/restart':
+            self._send_json(200, {'status': 'restarting', 'pid': os.getpid()})
+            log.info('Restart requested via /restart endpoint')
+            def _do_restart():
+                time.sleep(0.3)
+                # Delete PID/heartbeat and exit - scheduled task will restart
+                release_lock()
+                try:
+                    os.remove(HEARTBEAT_FILE)
+                except OSError:
+                    pass
+                log.info('Exiting for restart (scheduled task will restart)...')
+                os._exit(0)
+            threading.Thread(target=_do_restart, daemon=True).start()
+            return
+
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length)
 
