@@ -11,7 +11,7 @@ import logging.handlers
 import os
 import sys
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -404,7 +404,7 @@ if __name__ == '__main__':
     try:
         hb = threading.Thread(target=_heartbeat_loop, daemon=True)
         hb.start()
-        server = HTTPServer(('0.0.0.0', PORT_NEW), MCPHandler)
+        server = ThreadingHTTPServer(('0.0.0.0', PORT_NEW), MCPHandler)
         log.info(f'mcp-server-v2 listening on port {PORT_NEW}')
         log.info(f'Fallback: http://localhost:3000')
         server.serve_forever()

@@ -1,5 +1,5 @@
 ﻿"""
-tools/memory.py - memory邉ｻMCP繝・・繝ｫ・亥ｮ悟・迚茨ｼ・
+tools/memory.py - memory系MCPツール完全版
 """
 import sys
 import os
@@ -169,7 +169,7 @@ def tool_memory_append_decision(args: dict) -> dict:
     return {'success': True, 'id': entry_id}
 
 # ---------------------------------------------------------------------------
-# memory_decision_auto・・LM謚ｽ蜃ｺ・・
+# memory_decision_auto (LLM抽出)
 # ---------------------------------------------------------------------------
 def tool_memory_decision_auto(args: dict) -> dict:
     ns        = (args or {}).get('namespace', 'mirage-infra')
@@ -256,11 +256,11 @@ def tool_memory_freshness(args: dict) -> dict:
         return {'error': str(e)}
 
 # ---------------------------------------------------------------------------
-# 繝・・繝ｫ逋ｻ骭ｲ繝・・繝悶Ν
+# ツール登録テーブル
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# memory_l0 - Wing 繧ｵ繝槭Μ蟶ｸ譎ゅΟ繝ｼ繝・(L0)
+# memory_l0 - サマリ常時ロード (L0)
 # ---------------------------------------------------------------------------
 def tool_memory_l0(args: dict) -> dict:
     """L0: Return compact namespace summaries (50-100 tok each).
@@ -289,7 +289,7 @@ def tool_memory_l1(args: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Links 繝・・繝ｫ鄒､ (Phase 3)
+# Links ツール群 (Phase 3)
 # ---------------------------------------------------------------------------
 def _links_connect():
     import sqlite3, os
@@ -487,16 +487,16 @@ def tool_memory_consolidate(args: dict) -> dict:
             f"[{i+1}] ({e['type']}) {e['title']}: {e['content']}"
             for i, e in enumerate(group)
         ])
-        prompt = f"""莉･荳九・{ns}縺ｮ險俶・繧ｨ繝ｳ繝医Μ{len(group)}莉ｶ繧偵・縺､縺ｮsemantic險俶・縺ｨ縺励※譏・庄縺励※縺上□縺輔＞縲・
-驥崎､・・髢｢騾｣縺吶ｋ諠・ｱ繧堤ｵｱ蜷医＠縲∵悽雉ｪ逧・↑遏･隴倥ｒ謚ｽ蜃ｺ縺励※縺上□縺輔＞縲・
+        prompt = f"""以下の{ns}の記憶エントリ{len(group)}件を1つのsemantic記憶として統合してください。
+関連する情報を統合し、本質的な知識を抽出してください。
 
 {entries_text}
 
-莉･荳九・JSON蠖｢蠑上〒霑斐＠縺ｦ縺上□縺輔＞・域律譛ｬ隱朧K・・
+以下のJSON形式で返してください（日本語OK）
 {{
-  "title": "邨ｱ蜷亥ｾ後・繧ｿ繧､繝医Ν",
-  "content": "邨ｱ蜷医＆繧後◆蜀・ｮｹ・・00譁・ｭ嶺ｻ･蜀・ｼ・,
-  "tags": ["繧ｿ繧ｰ1", "繧ｿ繧ｰ2"],
+  "title": "統合後のタイトル",
+  "content": "統合された内容（200文字以内）,
+  "tags": ["タグ1", "タグ2"],
   "importance": 4
 }}"""
         

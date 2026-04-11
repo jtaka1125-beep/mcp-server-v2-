@@ -4,7 +4,7 @@ memory/store.py - 既存memory_store.pyの薄いwrapper
 DBは既存の memory.db を共有する。
 """
 import sys, os
-sys.path.insert(0, r'C:\MirageWork\mcp-server')
+sys.path.insert(0, r'C:\MirageWork\mirage-shared')
 
 from memory_store import (
     append_entry,

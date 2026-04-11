@@ -1,1 +1,64 @@
 2026-04-09 05:00:43 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  391 out=  182 total=   573 | OK | 
+2026-04-09 19:03:01 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  728 out=  442 total=  1170 | OK | 
+2026-04-09 19:06:12 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  386 out=  256 total=   642 | OK | 
+2026-04-09 19:06:48 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | 429 Client Error: Too Many Requests for url: https://api.cerebras.ai/v1/chat/com
+2026-04-09 19:06:48 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:06:50 | cerebras   | llama3.1-8b                      | in=  403 out=  208 total=   611 | OK | 
+2026-04-09 19:07:00 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  386 out=   58 total=   444 | OK | 
+2026-04-09 19:07:04 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  728 out=  435 total=  1163 | OK | 
+2026-04-09 19:07:09 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2667 out=  800 total=  3467 | OK | 
+2026-04-09 19:10:05 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:10:06 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  982 out=  400 total=  1382 | OK | 
+2026-04-09 19:10:09 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:10:14 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  885 out=  400 total=  1285 | OK | 
+2026-04-09 19:10:31 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | GROQ_API_KEY not set
+2026-04-09 19:10:31 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | CEREBRAS_API_KEY not set
+2026-04-09 19:10:31 | cerebras_8b | ?                                | in=    0 out=    0 total=     0 | FAIL | CEREBRAS_API_KEY not set
+2026-04-09 19:10:33 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | GROQ_API_KEY not set
+2026-04-09 19:10:33 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | CEREBRAS_API_KEY not set
+2026-04-09 19:10:33 | cerebras_8b | ?                                | in=    0 out=    0 total=     0 | FAIL | CEREBRAS_API_KEY not set
+2026-04-09 19:10:55 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:10:57 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1053 out=  400 total=  1453 | OK | 
+2026-04-09 19:11:00 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:11:01 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1092 out=  400 total=  1492 | OK | 
+2026-04-09 19:11:05 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:11:06 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  935 out=  400 total=  1335 | OK | 
+2026-04-09 19:11:33 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:11:34 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | 429 Client Error: Too Many Requests for url: https://api.cerebras.ai/v1/chat/com
+2026-04-09 19:11:34 | cerebras   | llama3.1-8b                      | in=  216 out=   80 total=   296 | OK | 
+2026-04-09 19:11:37 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 19:11:37 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  226 out=  150 total=   376 | OK | 
+2026-04-09 19:15:57 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 3452 out=  800 total=  4252 | OK | 
+2026-04-09 19:15:59 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2094 out=  800 total=  2894 | OK | 
+2026-04-09 19:16:01 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 3004 out=  800 total=  3804 | OK | 
+2026-04-09 20:01:41 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | 429 Client Error: Too Many Requests for url: https://api.cerebras.ai/v1/chat/com
+2026-04-09 20:01:42 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 20:01:42 | cerebras   | llama3.1-8b                      | in=  874 out=  800 total=  1674 | OK | 
+2026-04-09 20:02:51 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 3160 out=  800 total=  3960 | OK | 
+2026-04-09 20:02:55 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 3465 out=  800 total=  4265 | OK | 
+2026-04-09 20:02:57 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | 429 Client Error: Too Many Requests for url: https://api.cerebras.ai/v1/chat/com
+2026-04-09 20:02:58 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 20:02:59 | cerebras   | llama3.1-8b                      | in= 2333 out=  800 total=  3133 | OK | 
+2026-04-09 21:34:23 | groq       | llama-3.3-70b-versatile          | in=   37 out=    2 total=    39 | OK | 
+2026-04-09 21:54:43 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  327 out=  481 total=   808 | OK | 
+2026-04-09 21:54:48 | cerebras_qwen | ?                                | in=    0 out=    0 total=     0 | FAIL | 429 Client Error: Too Many Requests for url: https://api.cerebras.ai/v1/chat/com
+2026-04-09 21:54:48 | groq_70b   | ?                                | in=    0 out=    0 total=     0 | FAIL | 401 Client Error: Unauthorized for url: https://api.groq.com/openai/v1/chat/comp
+2026-04-09 21:54:49 | cerebras   | llama3.1-8b                      | in= 2264 out=  800 total=  3064 | OK | 
+2026-04-09 22:08:03 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  412 out=  454 total=   866 | OK | 
+2026-04-09 22:08:11 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2642 out=  800 total=  3442 | OK | 
+2026-04-09 22:24:43 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  216 out=  548 total=   764 | OK | 
+2026-04-09 22:24:47 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2351 out=  800 total=  3151 | OK | 
+2026-04-09 22:46:18 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  603 out=  745 total=  1348 | OK | 
+2026-04-09 22:46:24 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1510 out=  800 total=  2310 | OK | 
+2026-04-09 22:46:28 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2012 out=  800 total=  2812 | OK | 
+2026-04-10 06:41:41 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  940 out=  777 total=  1717 | OK | 
+2026-04-10 06:41:46 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  915 out=  504 total=  1419 | OK | 
+2026-04-10 06:41:52 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2012 out=  800 total=  2812 | OK | 
+2026-04-10 12:59:42 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 2640 out=  800 total=  3440 | OK | 
+2026-04-10 12:59:45 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 3283 out=  800 total=  4083 | OK | 
+2026-04-10 12:59:49 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  585 out=  511 total=  1096 | OK | 
+2026-04-10 12:59:53 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1968 out=  800 total=  2768 | OK | 
+2026-04-10 12:59:57 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1650 out=  800 total=  2450 | OK | 
+2026-04-10 14:56:07 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  585 out=  449 total=  1034 | OK | 
+2026-04-10 15:33:41 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in= 1959 out=  800 total=  2759 | OK | 
+2026-04-11 19:42:53 | cerebras   | qwen-3-235b-a22b-instruct-2507   | in=  633 out=  800 total=  1433 | OK | 
