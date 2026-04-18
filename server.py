@@ -263,7 +263,67 @@ class MCPHandler(BaseHTTPRequestHandler):
             }).encode()
             self.wfile.write(body)
 
+    def _handle_rest_post(self, path: str, body: bytes):
+        """Dispatch REST POST to the appropriate tools.memory handler.
+        Accepts params from both the query string and the JSON body;
+        body values override query values on collision."""
+        import urllib.parse
+        import json as _json
+        try:
+            parsed = urllib.parse.urlparse(path)
+            qs = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+            seg = parsed.path.lstrip("/").split("/")  # [api, v1, memory, compact]
+            if len(seg) < 4 or seg[0] != "api" or seg[1] != "v1":
+                self._send_json(404, {"error": f"unknown REST path: {parsed.path}"})
+                return
+            section = seg[2]
+            action  = seg[3]
+            # Parse JSON body (best-effort; empty body is fine)
+            body_args = {}
+            if body:
+                try:
+                    body_args = _json.loads(body)
+                except Exception:
+                    body_args = {}
+            args = {**qs, **body_args}  # body wins
+            # Only memory section is currently REST-POST enabled.
+            # Extend here (tools.system, tools.device, etc.) if needed.
+            if section == "memory":
+                import tools.memory as mem_tools
+                tool_name = "memory_" + action
+                tool = mem_tools.TOOLS.get(tool_name)
+                if not tool:
+                    self._send_json(404, {"error": f"unknown memory action: {action}"})
+                    return
+                # Coerce numeric query-string params that arrive as strings.
+                # tools handlers expect int for these, but parse_qs gives str.
+                schema_props = (tool.get("schema") or {}).get("properties", {})
+                for k, spec in schema_props.items():
+                    if k in args and spec.get("type") == "integer" and isinstance(args[k], str):
+                        try:
+                            args[k] = int(args[k])
+                        except ValueError:
+                            pass
+                result = tool["handler"](args)
+                self._send_json(200, result)
+                return
+            self._send_json(404, {"error": f"REST POST not implemented for section: {section}"})
+        except Exception as e:
+            log.error(f"REST POST error {path}: {e}")
+            self._send_json(500, {"error": str(e)})
+
     def do_POST(self):
+        # REST POST routing (P0-2.5 aftermath fix, 2026-04-18):
+        # v2 server was JSON-RPC only; REST paths like /api/v1/memory/compact
+        # fell through to the JSON-RPC dispatcher which returned an empty
+        # "unknown method" error. Now we pre-check for /api/v1/ REST paths
+        # and route them to the tools.memory.TOOLS handlers directly.
+        if self.path.startswith("/api/v1/"):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length > 0 else b""
+            self._handle_rest_post(self.path, body)
+            return
+
         # Handle /restart endpoint
         if self.path == '/restart':
             self._send_json(200, {'status': 'restarting', 'pid': os.getpid()})
