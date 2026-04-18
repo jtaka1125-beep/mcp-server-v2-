@@ -9,16 +9,19 @@ logs/*.log
 logs/*.log.*
 logs/*.json
 
-# Data（既存DBは共有なのでここには置かない）
+# Data: 既存DBは共有なのでここには置かない
 data/
+
+# Runtime state (heartbeat, pid) — never commit
+server.heartbeat
+server.pid
 
 # 一時ファイル
 *.tmp
 *.bak
-"*.pyc"  
-"server.heartbeat"  
-"server.pid"  
-"patch_*.py"  
-"add_*.py"  
-"fix_*.py"  
-"install_*.ps1"  
+
+# One-off scripts (patch / fix / add / install) — never commit
+patch_*.py
+add_*.py
+fix_*.py
+install_*.ps1
