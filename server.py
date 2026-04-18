@@ -60,8 +60,16 @@ TOOLS.update(memory_tools.TOOLS)
 import tools.system as system_tools; TOOLS.update(system_tools.TOOLS)
 import tools.device as device_tools; TOOLS.update(device_tools.TOOLS)
 import tools.build    as build_tools;    TOOLS.update(build_tools.TOOLS)
-import tools.task     as task_tools;     TOOLS.update(task_tools.TOOLS)
-import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
+# P4-2 stage 3 precursor: optional dispatcher-backed task/loop.
+# Set V2_USE_DISPATCHER=1 in the env to route run_task/run_loop through
+# dispatcher.py instead of the legacy subprocess+thread path. Default off.
+if os.environ.get('V2_USE_DISPATCHER', '').strip() == '1':
+    import tools.task_v2 as task_tools;     TOOLS.update(task_tools.TOOLS)
+    import tools.loop_v2 as loop_tools;     TOOLS.update(loop_tools.TOOLS)
+    log.info('v2 dispatcher path enabled (V2_USE_DISPATCHER=1)')
+else:
+    import tools.task     as task_tools;     TOOLS.update(task_tools.TOOLS)
+    import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
 import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
 
