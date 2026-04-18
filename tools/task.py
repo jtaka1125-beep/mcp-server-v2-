@@ -15,6 +15,7 @@ import logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import MIRAGE_DIR, CLAUDE_EXE
+from parallel import CLI_GATE, gate_stats
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,24 @@ def _get_server_log_tail(n: int = 20) -> str:
         return ''
 
 # ---------------------------------------------------------------------------
+# P4-2: gated subprocess.run wrapper (shared CLI concurrency gate)
+# ---------------------------------------------------------------------------
+def _gated_subprocess_run(task_id, cmd, **kwargs):
+    """Block on CLI_GATE; mark task queued if no slot; run; release on exit."""
+    if not CLI_GATE.try_acquire():
+        with _tasks_lock:
+            if task_id in _tasks:
+                _tasks[task_id]['status'] = 'queued'
+        CLI_GATE.acquire()
+    try:
+        with _tasks_lock:
+            if task_id in _tasks:
+                _tasks[task_id]['status'] = 'running'
+        return subprocess.run(cmd, **kwargs)
+    finally:
+        CLI_GATE.release()
+
+# ---------------------------------------------------------------------------
 # Claude Code CLI 実行
 # ---------------------------------------------------------------------------
 def _run_claude_async(task_id: str, prompt: str, cwd: str, model: str = None):
@@ -57,11 +76,9 @@ def _run_claude_async(task_id: str, prompt: str, cwd: str, model: str = None):
         cmd += ['--model', model]
 
     try:
-        with _tasks_lock:
-            _tasks[task_id]['status'] = 'running'
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
+        result = _gated_subprocess_run(
+            task_id, cmd,
+            capture_output=True, text=True,
             timeout=300, env=env, cwd=cwd,
             encoding='utf-8', errors='replace',
         )
@@ -137,9 +154,14 @@ def tool_task_status(args: dict) -> str:
 
     with _tasks_lock:
         if not task_id:
+            gs = gate_stats()
+            header = (
+                '=== Tasks (gate: cap=%d in_use=%d waiting=%d) ===' %
+                (gs['capacity'], gs['in_use'], gs['waiting'])
+            )
             if not _tasks:
-                return 'No tasks found'
-            lines = ['=== Tasks ===']
+                return header + '\nNo tasks found'
+            lines = [header]
             for tid, task in list(_tasks.items())[-10:]:
                 elapsed = time.time() - task.get('started_at', time.time())
                 lines.append(
@@ -157,6 +179,7 @@ def tool_task_status(args: dict) -> str:
         return (
             f"=== Task {task_id} ===\n"
             f"Status: {task['status']}\n"
+            f"Gate: cap={gate_stats()['capacity']} in_use={gate_stats()['in_use']} waiting={gate_stats()['waiting']}\n"
             f"Elapsed: {elapsed:.0f}s\n"
             f"Prompt: {task.get('prompt','')[:100]}\n\n"
             f"--- Output ---\n{output[-3000:]}"

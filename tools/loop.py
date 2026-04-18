@@ -11,6 +11,9 @@ import time
 import json
 import threading
 import logging
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from parallel import CLI_GATE, gate_stats
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 sys.path.insert(0, r'C:\MirageWork\mcp-server')
@@ -38,6 +41,21 @@ def _run_job(job_id: str, task: str, max_rounds: int, engine: str = None):
             _loop_jobs[job_id]['status'] = 'error'
             _loop_jobs[job_id]['result'] = {'error': str(e)}
 
+def _run_job_gated(job_id: str, task: str, max_rounds: int, engine: str = None):
+    """P4-2: gate-bounded wrapper around _run_job."""
+    if not CLI_GATE.try_acquire():
+        with _jobs_lock:
+            if job_id in _loop_jobs:
+                _loop_jobs[job_id]['status'] = 'queued'
+        CLI_GATE.acquire()
+    try:
+        with _jobs_lock:
+            if job_id in _loop_jobs:
+                _loop_jobs[job_id]['status'] = 'running'
+        _run_job(job_id, task, max_rounds, engine)
+    finally:
+        CLI_GATE.release()
+
 # ---------------------------------------------------------------------------
 # run_loop
 # ---------------------------------------------------------------------------
@@ -63,7 +81,7 @@ def tool_run_loop(args: dict) -> str:
         }
 
     threading.Thread(
-        target=_run_job,
+        target=_run_job_gated,
         args=(job_id, task, max_rounds, engine),
         daemon=True,
     ).start()
@@ -93,7 +111,7 @@ def tool_run_loop_v2(args: dict) -> str:
         }
 
     threading.Thread(
-        target=_run_job,
+        target=_run_job_gated,
         args=(job_id, task, max_rounds, engine),
         daemon=True,
     ).start()
@@ -111,9 +129,14 @@ def tool_loop_status(args: dict) -> str:
 
     with _jobs_lock:
         if not job_id:
+            gs = gate_stats()
+            header = (
+                '=== Loop Jobs (gate: cap=%d in_use=%d waiting=%d) ===' %
+                (gs['capacity'], gs['in_use'], gs['waiting'])
+            )
             if not _loop_jobs:
-                return 'No loop jobs found'
-            lines = ['=== Loop Jobs ===']
+                return header + '\nNo loop jobs found'
+            lines = [header]
             for jid, job in list(_loop_jobs.items())[-10:]:
                 elapsed = time.time() - job.get('started_at', time.time())
                 lines.append(
@@ -134,6 +157,7 @@ def tool_loop_status(args: dict) -> str:
         return (
             f"=== Loop Job {job_id} ===\n"
             f"Status: {job['status']}\n"
+            f"Gate: cap={gate_stats()['capacity']} in_use={gate_stats()['in_use']} waiting={gate_stats()['waiting']}\n"
             f"Engine: {job.get('engine','?')}\n"
             f"Elapsed: {elapsed:.0f}s\n"
             f"Task: {job['task']}\n\n"
