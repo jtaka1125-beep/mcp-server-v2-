@@ -25,3 +25,8 @@ patch_*.py
 add_*.py
 fix_*.py
 install_*.ps1
+ 
+# Swap-out backups and one-shot patch scripts 
+*.bak_* 
+*.old_* 
+v2_patch_ready.py 

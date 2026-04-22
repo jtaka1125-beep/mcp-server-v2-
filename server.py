@@ -235,42 +235,6 @@ class MCPHandler(BaseHTTPRequestHandler):
             log.error(f'API route error {path}: {e}')
             self._send_json(500, {'error': str(e)})
 
-    def _proxy_api_get(self, path: str):
-        """Forward GET /api/* to V1. V1 落ちたら V2 自身で応答する"""
-        import urllib.request, json as _json
-        legacy_url = 'http://localhost:3000'
-        try:
-            with urllib.request.urlopen(f'{legacy_url}{path}', timeout=5) as resp:
-                data = resp.read()
-                self.send_response(200)
-                ct = resp.headers.get('Content-Type', 'application/json')
-                self.send_header('Content-Type', ct)
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(data)
-        except Exception:
-            # V1 落ちてる -> V2 自身で /api/* に応答する
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            try:
-                import psutil
-                mem = psutil.Process().memory_percent()
-                cpu = psutil.Process().cpu_percent()
-            except Exception:
-                mem = cpu = 0.0
-            body = _json.dumps({
-                'server_v2': 'running',
-                'port': PORT_NEW,
-                'cpu_percent': cpu,
-                'memory_percent': mem,
-                'uptime_sec': 0,
-                'server_v1': 'unreachable',
-                'v1_fallback': True,
-            }).encode()
-            self.wfile.write(body)
-
     def _handle_rest_post(self, path: str, body: bytes):
         """Dispatch REST POST to the appropriate tools.memory handler.
         Accepts params from both the query string and the JSON body;

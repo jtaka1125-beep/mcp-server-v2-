@@ -136,6 +136,37 @@ def tool_git_status(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # status (サーバー・デバイス全体状態)
 # ---------------------------------------------------------------------------
+# V1 check cache to avoid hammering V1 on frequent status polls
+_v1_check_cache = {'value': None, 'ts': 0.0}
+_V1_CHECK_TTL_SEC = 5.0
+
+
+def _check_v1_cached():
+    """Check V1 /health with short cache. Returns (status, reason_or_None)."""
+    now = time.time()
+    cached = _v1_check_cache
+    if cached['value'] is not None and (now - cached['ts']) < _V1_CHECK_TTL_SEC:
+        return cached['value']
+    try:
+        import requests
+        r = requests.get('http://localhost:3000/health', timeout=5)
+        if r.status_code == 200:
+            result = ('running', None)
+        else:
+            result = ('error', 'http_' + str(r.status_code))
+    except Exception as e:
+        name = type(e).__name__
+        if 'Timeout' in name:
+            result = ('unreachable', 'timeout_5s')
+        elif 'ConnectionError' in name or 'Connection' in name:
+            result = ('unreachable', 'connection_refused')
+        else:
+            result = ('unreachable', 'exception_' + name)
+    _v1_check_cache['value'] = result
+    _v1_check_cache['ts'] = now
+    return result
+
+
 def tool_status(args: dict) -> dict:
     import psutil
     result = {
@@ -145,14 +176,12 @@ def tool_status(args: dict) -> dict:
         'memory_percent': psutil.virtual_memory().percent,
         'uptime_sec': time.time() - _start_time,
     }
-    # 旧サーバーの生存確認
-    try:
-        import requests
-        r = requests.get('http://localhost:3000/health', timeout=2)
-        result['server_v1'] = 'running' if r.status_code == 200 else 'error'
-    except Exception:
-        result['server_v1'] = 'unreachable'
+    v1_status, v1_reason = _check_v1_cached()
+    result['server_v1'] = v1_status
+    if v1_reason:
+        result['server_v1_reason'] = v1_reason
     return result
+
 
 _start_time = time.time()
 
