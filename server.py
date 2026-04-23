@@ -72,6 +72,7 @@ else:
     import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
 import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
+import tools.windows_ops as winops_tools; TOOLS.update(winops_tools.TOOLS)
 
 log.info(f'Registered tools: {list(TOOLS.keys())}')
 
