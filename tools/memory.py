@@ -39,21 +39,47 @@ def tool_memory_bootstrap(args: dict) -> dict:
 # memory_compact
 # ---------------------------------------------------------------------------
 def tool_memory_compact(args: dict) -> dict:
-    ns        = (args or {}).get('namespace', 'mirage-infra')
-    max_chars = int((args or {}).get('max_chars', 800) or 800)
-    window    = int((args or {}).get('window', 200) or 200)
+    """v3 (2026-04-26): 時系列 + 増分更新対応。
 
+    変更点:
+      - max_chars デフォルト 2000 (旧 800)
+      - window デフォルト 100 (旧 200 だが msgs[:20] 切り捨てで実質 20 だった)
+      - 既存 bootstrap を取得し prev_summary として compact に渡す
+      - decisions の混入は維持
+    """
+    ns        = (args or {}).get('namespace', 'mirage-infra')
+    max_chars = int((args or {}).get('max_chars', 2000) or 2000)
+    window    = int((args or {}).get('window', 100) or 100)
+
+    # Fetch recent raw entries (created_at 含む)
     msgs = mem.fetch_recent_raw(ns, window=window)
+
+    # Mix in recent decisions
     try:
-        dec_hits = mem.search(ns, query='', types=['decision'], limit=20)
-        dec_msgs = [{'role': 'decision', 'content': h.get('content', '')}
-                    for h in dec_hits.get('hits', [])]
-        msgs = dec_msgs + msgs
+        dec_hits = mem.search(ns, query='', types=['decision'], limit=30)
+        dec_msgs = []
+        for h in dec_hits.get('hits', []):
+            dec_msgs.append({
+                'role': 'decision',
+                'content': h.get('content', '') or h.get('snippet', ''),
+                'created_at': h.get('created_at', 0) or 0,
+            })
+        # Sort decisions newest first, then merge
+        dec_msgs.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+        msgs = dec_msgs[:20] + msgs
     except Exception:
         pass
 
     if not msgs:
         return {'updated': False, 'error': 'no logs'}
+
+    # Get previous bootstrap for incremental update
+    prev_summary = ''
+    try:
+        prev = mem.get_bootstrap(ns, max_chars=max_chars * 2)
+        prev_summary = prev.get('summary', '') or ''
+    except Exception:
+        pass
 
     job_id = str(uuid.uuid4())[:8]
     with _jobs_lock:
@@ -64,12 +90,17 @@ def tool_memory_compact(args: dict) -> dict:
 
     def _run():
         try:
-            result = mem_compact.run(ns, msgs, max_chars=max_chars)
+            result = mem_compact.run(
+                ns, msgs,
+                max_chars=max_chars,
+                prev_summary=prev_summary,
+            )
             bootstrap = result.get('bootstrap', '')
             upd = mem.compact_update_bootstrap(ns, bootstrap, max_chars=max_chars) \
                   if bootstrap else {'updated': False}
             final = {**upd, 'error': result.get('error'),
-                     'backend': 'llm.py', 'model': 'qwen-3-235b'}
+                     'backend': 'llm.py', 'model': 'qwen-3-235b',
+                     'compact_version': 'v3'}
             with _jobs_lock:
                 _jobs[job_id]['state'] = 'done'
                 _jobs[job_id]['result'] = final
@@ -80,7 +111,7 @@ def tool_memory_compact(args: dict) -> dict:
 
     threading.Thread(target=_run, daemon=True).start()
     return {'job_id': job_id, 'state': 'running', 'namespace': ns,
-            'message': 'Compact started (v2: qwen-3-235b, labeled format)'}
+            'message': 'Compact v3 started (qwen-3-235b, 時系列+増分更新)'}
 
 # ---------------------------------------------------------------------------
 # memory_compact_status
@@ -112,7 +143,9 @@ def tool_memory_search(args: dict) -> dict:
     query = (args or {}).get('query', '')
     limit = int((args or {}).get('limit', 10) or 10)
     types = (args or {}).get('types', None)
-    results = mem.search(ns, query=query, types=types, limit=limit)
+    inc_sup = bool((args or {}).get('include_superseded', False))
+    results = mem.search(ns, query=query, types=types, limit=limit,
+                         include_superseded=inc_sup)
     try:
         for e in (results.get('results') or results.get('hits') or []):
             if e.get('id'):
@@ -120,6 +153,59 @@ def tool_memory_search(args: dict) -> dict:
     except Exception:
         pass
     return results
+
+# ---------------------------------------------------------------------------
+# memory_dig: drill down older entries for a theme, grouped by date
+# ---------------------------------------------------------------------------
+def tool_memory_dig(args: dict) -> dict:
+    from datetime import datetime
+    ns     = (args or {}).get('namespace', 'mirage-infra')
+    theme  = ((args or {}).get('theme') or '').strip()
+    before = ((args or {}).get('before_date') or '').strip()
+    limit  = int((args or {}).get('limit', 20) or 20)
+    inc_sup = bool((args or {}).get('include_superseded', False))
+    if not theme:
+        return {'error': 'theme is required'}
+
+    # namespace='*' or empty -> cross-namespace dig via search_all.
+    # Returned hits include 'namespace' field.
+    if ns in ('*', '', 'all'):
+        try:
+            from memory_store import search_all
+            raw = search_all(theme, limit=limit * 3)
+        except Exception as e:
+            return {'error': f'search_all failed: {e}'}
+    else:
+        raw = mem.search(ns, query=theme, limit=limit * 3,
+                         include_superseded=inc_sup)
+    hits = raw.get('results') or raw.get('hits') or []
+
+    if before:
+        try:
+            cut_ts = int(datetime.strptime(before, '%Y-%m-%d').timestamp())
+            hits = [h for h in hits if int(h.get('created_at', 0) or 0) < cut_ts]
+        except Exception:
+            pass
+    hits = hits[:limit]
+
+    groups: dict = {}
+    for h in hits:
+        ts = int(h.get('created_at', 0) or 0)
+        d = datetime.fromtimestamp(ts).strftime('%Y-%m-%d') if ts else 'unknown'
+        groups.setdefault(d, []).append(h)
+        if h.get('id'):
+            try:
+                mem.touch_entry(h['id'])
+            except Exception:
+                pass
+
+    return {
+        'namespace': ns,
+        'theme': theme,
+        'before_date': before,
+        'count': len(hits),
+        'groups': groups,
+    }
 
 # ---------------------------------------------------------------------------
 # memory_search_all (cross-namespace)
@@ -231,6 +317,31 @@ def tool_memory_supersede(args: dict) -> dict:
         return supersede_entry(old_id, new_id)
     except Exception as e:
         return {'error': str(e)}
+
+# ---------------------------------------------------------------------------
+# memory_get (fetch full entry by id)
+# ---------------------------------------------------------------------------
+def tool_memory_get(args: dict) -> dict:
+    """Fetch a full entry by ID or hex prefix. Use after memory_search
+    when the snippet is insufficient.
+    """
+    entry_id = (args or {}).get('id', '') or (args or {}).get('entry_id', '')
+    if not entry_id:
+        return {'error': 'id required'}
+    try:
+        from memory_store import get_entry_full
+        result = get_entry_full(entry_id)
+        # Bump access_count using the resolved full id, not the input prefix
+        if 'error' not in result and result.get('id'):
+            try:
+                from memory_store import touch_entry
+                touch_entry(result['id'])
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        return {'error': str(e)}
+
 
 # ---------------------------------------------------------------------------
 # memory_active_decisions
@@ -573,43 +684,38 @@ def tool_memory_consolidate(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 def tool_memory_ingest(args: dict) -> dict:
     """Ingest a new entry and auto-generate cross-reference links.
-    
-    Workflow (karpathy LLM Wiki pattern):
+
+    [v2 2026-04-26: CJK-safe search + tag fallback + debug info]
+
+    Workflow:
     1. Write new entry to DB
-    2. FTS search for related existing entries  
-    3. LLM judges relation type for each candidate
-    4. Auto-create links for matches
-    5. Assign room_id if not specified
-    
-    Args:
-        namespace, type, title, content, tags, importance: same as memory_append_raw
-        room_id: optional, auto-assigned if omitted
-        auto_link: bool (default True) - run cross-reference generation
-        max_candidates: int (default 5) - max entries to check for links
+    2. Build CJK-safe search query (tags + title + first 100 chars; no split)
+    3. FTS search; if 0 hits, fall back to per-tag search
+    4. LLM judges relation type for top candidates
+    5. Auto-create links for matches
+    6. Return links_created count + auto_link_debug for visibility
     """
     import sqlite3, uuid, time, json
-    
-    ns          = (args or {}).get('namespace', 'mirage-infra')
-    etype       = (args or {}).get('type', 'raw')
-    title       = (args or {}).get('title', '')
-    content     = (args or {}).get('content', '')
-    tags        = (args or {}).get('tags', [])
-    importance  = int((args or {}).get('importance', 3) or 3)
-    room_id     = (args or {}).get('room_id', None)
-    auto_link   = bool((args or {}).get('auto_link', True))
-    max_cands   = int((args or {}).get('max_candidates', 5) or 5)
-    
+
+    ns         = (args or {}).get('namespace', 'mirage-infra')
+    etype      = (args or {}).get('type', 'raw')
+    title      = (args or {}).get('title', '')
+    content    = (args or {}).get('content', '')
+    tags       = (args or {}).get('tags', [])
+    importance = int((args or {}).get('importance', 3) or 3)
+    room_id    = (args or {}).get('room_id', None)
+    auto_link  = bool((args or {}).get('auto_link', True))
+    max_cands  = int((args or {}).get('max_candidates', 5) or 5)
+
     if not content:
         return {'error': 'content required'}
-    
-    # 1. Write entry
+
     from memory import store as mem_store
     mem_store.append_entry(
         namespace=ns, type_=etype, title=title,
         content=content, tags=tags, importance=importance, role='user',
     )
-    
-    # Find the new entry id
+
     db = r'C:\MirageWork\mcp-server\data\memory.db'
     con = sqlite3.connect(db)
     try:
@@ -620,29 +726,59 @@ def tool_memory_ingest(args: dict) -> dict:
         if not new_row:
             return {'error': 'entry not found after insert'}
         new_id = new_row[0]
-        
-        # 2. Assign room_id
+
         if not room_id:
             room_id = f'{ns}:general'
         con.execute("UPDATE entries SET room_id=? WHERE id=?", (room_id, new_id))
         con.commit()
-        
+
         links_created = []
-        
+        debug = {
+            'auto_link_enabled': auto_link,
+            'fts_candidates': 0,
+            'tag_fallback_candidates': 0,
+            'hits_for_llm': 0,
+            'llm_called': False,
+        }
+
         if auto_link and content.strip():
-            # 3. FTS search for related entries
-            search_query = ' '.join((title + ' ' + content)[:200].split()[:10])
+            query_parts = list(tags) if tags else []
+            if title:
+                query_parts.append(title)
+            if content:
+                query_parts.append(content[:100])
+            search_query = ' '.join(query_parts)[:200]
+            debug['search_query'] = search_query[:100]
+
             candidates = mem_store.search(ns, query=search_query, limit=max_cands * 2)
-            hits = [h for h in candidates.get('hits', []) if h.get('id') != new_id][:max_cands]
-            
+            fts_hits = [h for h in candidates.get('hits', []) if h.get('id') != new_id]
+            debug['fts_candidates'] = len(fts_hits)
+            hits = fts_hits[:max_cands]
+
+            if not hits and tags:
+                tag_hits = []
+                for tag in tags[:3]:
+                    tag_search = mem_store.search(ns, query=tag, limit=3)
+                    tag_hits.extend([h for h in tag_search.get('hits', [])
+                                     if h.get('id') != new_id])
+                seen = set()
+                hits = []
+                for h in tag_hits:
+                    if h['id'] not in seen:
+                        seen.add(h['id'])
+                        hits.append(h)
+                hits = hits[:max_cands]
+                debug['tag_fallback_candidates'] = len(hits)
+
+            debug['hits_for_llm'] = len(hits)
+
             if hits:
-                # 4. LLM judges relations
                 cand_text = '\n'.join([
                     f"[{i+1}] id={h['id'][:8]} type={h.get('type','')} "
                     f"title={h.get('title','')[:40]}: {str(h.get('snippet',''))[:80]}"
                     for i, h in enumerate(hits)
                 ])
-                
+
                 prompt = f"""新しいエントリとの関係を判定してください。
 
 新エントリ: {title or content[:100]}
@@ -656,13 +792,14 @@ def tool_memory_ingest(args: dict) -> dict:
   ...
 ]
 関係のない候補は含めないでください。JSONのみ返してください。"""
-                
+
+                debug['llm_called'] = True
                 try:
                     import sys as _sys
                     _sys.path.insert(0, r'C:\MirageWork\mcp-server-v2')
                     import llm
                     raw = llm.call(prompt, purpose='ingest_link', max_tokens=300, timeout=20)
-                    
+
                     import re
                     match = re.search(r'\[.*?\]', raw, re.DOTALL)
                     if match:
@@ -689,14 +826,14 @@ def tool_memory_ingest(args: dict) -> dict:
                                 })
                         con.commit()
                 except Exception as e:
-                    # LLM failure is non-fatal
                     links_created.append({'error': str(e)[:60]})
-        
+
         return {
             'entry_id': new_id,
             'room_id': room_id,
             'links_created': len([l for l in links_created if 'error' not in l]),
             'links': links_created,
+            'auto_link_debug': debug,
         }
     finally:
         con.close()
@@ -757,25 +894,34 @@ def tool_memory_lint(args: dict) -> dict:
             })
         
         # --- 2. Stale decisions ---
-        stale_q = f"""
-            SELECT id, namespace, title, created_at, importance_v2
+        # Two queries: total count (uncapped) + sample rows (LIMIT 10).
+        # Previously a single LIMIT 10 query was used, so the displayed count
+        # capped at 10 even when hundreds of stale decisions existed.
+        stale_where = f"""
             FROM entries
             WHERE type = 'decision'
               AND created_at < ?
               AND id NOT IN (SELECT source_id FROM links WHERE relation_type = 'supersedes')
               AND (status IS NULL OR status = 'active')
               {ns_filter}
+        """
+        stale_total = con.execute(
+            f"SELECT COUNT(*) {stale_where}", [stale_ts] + ns_params
+        ).fetchone()[0]
+        stale_q = f"""
+            SELECT id, namespace, title, created_at, importance_v2
+            {stale_where}
             ORDER BY created_at ASC
             LIMIT 10
         """
         stale = con.execute(stale_q, [stale_ts] + ns_params).fetchall()
-        if stale:
+        if stale_total:
             report['issues'].append({
                 'type': 'stale_decision',
-                'count': len(stale),
+                'count': int(stale_total),
                 'sample': [{'id': r[0][:8], 'ns': r[1], 'title': (r[2] or '')[:40],
                             'age_days': int((now - r[3]) / 86400)} for r in stale[:5]],
-                'description': f'{len(stale)} decisions older than {stale_days}d with no supersedes link'
+                'description': f'{int(stale_total)} decisions older than {stale_days}d with no supersedes link'
             })
         
         # --- 3. Contradiction pairs ---
@@ -843,7 +989,7 @@ def tool_memory_lint(args: dict) -> dict:
             'total_links': link_count,
             'semantic_entries': semantic_count,
             'orphan_decisions': len(orphan_issues),
-            'stale_decisions': len(stale),
+            'stale_decisions': int(stale_total),
             'contradictions': len(contrad),
         }
         
@@ -852,9 +998,9 @@ def tool_memory_lint(args: dict) -> dict:
             report['suggestions'].append(
                 f"Run memory_compact for: {[r[0] for r in stale_boots]}"
             )
-        if len(stale) > 0:
+        if stale_total > 0:
             report['suggestions'].append(
-                f"Review {len(stale)} stale decisions - supersede or archive outdated ones"
+                f"Review {int(stale_total)} stale decisions - supersede or archive outdated ones"
             )
         if semantic_count == 0:
             report['suggestions'].append(
@@ -1196,13 +1342,13 @@ def tool_active_context(args: dict) -> dict:
     Designed to restore full situational awareness in < 1 tool call.
     
     Args:
-        namespaces:    list of namespaces (default: mirage-vulkan, mirage-infra, mirage-android)
+        namespaces:    list of namespaces (default: vulkan/infra/android/design/general — design 必須: 運用憲法 4755ea2a 含む)
         top_decisions: int (default 5) - number of top decisions to include
         hours:         int (default 24) - recent activity window
     """
     import time
     
-    ns_list      = (args or {}).get('namespaces', ['mirage-vulkan', 'mirage-infra', 'mirage-android'])
+    ns_list      = (args or {}).get('namespaces', ['mirage-vulkan', 'mirage-infra', 'mirage-android', 'mirage-design', 'mirage-general'])
     top_n        = int((args or {}).get('top_decisions', 5) or 5)
     hours        = int((args or {}).get('hours', 24) or 24)
     
@@ -1654,7 +1800,7 @@ TOOLS = {
     'active_context': {
         'description': 'One-shot session recovery: returns L0 summaries + top decisions + recent activity + physical TODOs. Call at session start.',
         'schema': {'type': 'object', 'properties': {
-            'namespaces':    {'type': 'array', 'items': {'type': 'string'}, 'description': 'Namespaces to include (default: vulkan/infra/android)'},
+            'namespaces':    {'type': 'array', 'items': {'type': 'string'}, 'description': 'Namespaces to include (default: vulkan/infra/android/design/general)'},
             'top_decisions': {'type': 'integer', 'description': 'Number of top decisions (default 5)'},
             'hours':         {'type': 'integer', 'description': 'Recent activity window in hours (default 24)'},
         }},
@@ -1694,14 +1840,26 @@ TOOLS = {
         'handler': tool_memory_compact_status,
     },
     'memory_search': {
-        'description': 'Search memory entries via FTS.',
+        'description': 'Search memory entries via FTS. Excludes superseded/archived entries by default.',
         'schema': {'type': 'object', 'properties': {
             'namespace': {'type': 'string'},
             'query': {'type': 'string'},
             'limit': {'type': 'integer'},
             'types': {'type': 'array', 'items': {'type': 'string'}},
+            'include_superseded': {'type': 'boolean', 'description': 'Default false. Set true to include superseded/archived entries (eg historical traversal).'},
         }, 'required': ['query']},
         'handler': tool_memory_search,
+    },
+    'memory_dig': {
+        'description': 'Drill down older entries for a specific theme (e.g. "idx_step6", "Layer2"). Returns hits grouped by date. Excludes superseded/archived entries by default. Use namespace="*" for cross-namespace dig.',
+        'schema': {'type': 'object', 'properties': {
+            'namespace':   {'type': 'string', 'description': 'Namespace to dig in. Use "*" or "all" for cross-namespace via search_all.'},
+            'theme':       {'type': 'string', 'description': 'Theme keyword e.g. idx_step6'},
+            'before_date': {'type': 'string', 'description': 'YYYY-MM-DD; return entries strictly older than this date'},
+            'limit':       {'type': 'integer', 'description': 'Max hits (default 20)'},
+            'include_superseded': {'type': 'boolean', 'description': 'Default false. Set true to include superseded/archived entries.'},
+        }, 'required': ['theme']},
+        'handler': tool_memory_dig,
     },
     'memory_search_all': {
         'description': 'Search across ALL namespaces.',
@@ -1749,6 +1907,13 @@ TOOLS = {
             'new_id': {'type': 'string'},
         }, 'required': ['old_id', 'new_id']},
         'handler': tool_memory_supersede,
+    },
+    'memory_get': {
+        'description': 'Fetch full entry by ID or hex prefix. Returns ambiguity error with candidate list if prefix matches multiple entries.',
+        'schema': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': 'Full UUID or hex prefix (>=4 chars). E.g. "bef2df67" resolves to bef2df67-ef05-...'},
+        }, 'required': ['id']},
+        'handler': tool_memory_get,
     },
     'memory_active_decisions': {
         'description': 'Get only active (non-superseded) decisions for a namespace.',

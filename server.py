@@ -11,7 +11,20 @@ import logging.handlers
 import os
 import sys
 import time
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    # Windows での dual-bind 防止: allow_reuse_address=True (デフォルト) は
+    # 「他プロセスがポート横取り bind 可能」という危険動作。SO_EXCLUSIVEADDRUSE で独占。
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self):
+        if sys.platform == "win32":
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -73,6 +86,8 @@ else:
 import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
 import tools.windows_ops as winops_tools; TOOLS.update(winops_tools.TOOLS)
+import tools.ai       as ai_tools;        TOOLS.update(ai_tools.TOOLS)
+import tools.step6    as step6_tools;     TOOLS.update(step6_tools.TOOLS)
 
 log.info(f'Registered tools: {list(TOOLS.keys())}')
 
@@ -198,6 +213,16 @@ class MCPHandler(BaseHTTPRequestHandler):
                 self._send_json(200, result)
             elif section == 'context':
                 self._send_json(200, {'name': 'mirage-mcp-v2', 'status': 'ok', 'port': PORT_NEW})
+            elif section == 'ai':
+                # /api/v1/ai/context : Self-Describing System Interface.
+                # Pull-only manual that any AI client (Code, GPT, etc.) can
+                # fetch to align mental model with reality. facts only.
+                if action == 'context':
+                    import tools.ai as ai_tools
+                    result = ai_tools.TOOLS['ai_context']['handler']({})
+                    self._send_json(200, result)
+                else:
+                    self._send_json(404, {'error': f'unknown ai action: {action}'})
             elif section == 'url_queue':
                 self._send_json(200, {'cleared': 0, 'note': 'v2 has no url_queue'})
             elif section == 'adb':
@@ -437,7 +462,7 @@ if __name__ == '__main__':
     try:
         hb = threading.Thread(target=_heartbeat_loop, daemon=True)
         hb.start()
-        server = ThreadingHTTPServer(('0.0.0.0', PORT_NEW), MCPHandler)
+        server = ExclusiveThreadingHTTPServer(('0.0.0.0', PORT_NEW), MCPHandler)
         log.info(f'mcp-server-v2 listening on port {PORT_NEW}')
         log.info(f'Fallback: http://localhost:3000')
         server.serve_forever()
