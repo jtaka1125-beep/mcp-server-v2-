@@ -288,6 +288,8 @@ class MCPHandler(BaseHTTPRequestHandler):
             # Extend here (tools.system, tools.device, etc.) if needed.
             if section == "memory":
                 import tools.memory as mem_tools
+                if action == "decision":
+                    action = "append_decision"
                 tool_name = "memory_" + action
                 tool = mem_tools.TOOLS.get(tool_name)
                 if not tool:

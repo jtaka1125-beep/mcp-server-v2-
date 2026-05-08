@@ -146,6 +146,21 @@ def tool_memory_search(args: dict) -> dict:
     inc_sup = bool((args or {}).get('include_superseded', False))
     results = mem.search(ns, query=query, types=types, limit=limit,
                          include_superseded=inc_sup)
+    for key in ('results', 'hits'):
+        if key not in results or not isinstance(results.get(key), list):
+            continue
+        seen_ids = set()
+        deduped = []
+        for e in results[key]:
+            entry_id = e.get('id') if isinstance(e, dict) else None
+            if entry_id:
+                if entry_id in seen_ids:
+                    continue
+                seen_ids.add(entry_id)
+            deduped.append(e)
+        results[key] = deduped
+        if isinstance(results.get('count'), int):
+            results['count'] = len(deduped)
     try:
         for e in (results.get('results') or results.get('hits') or []):
             if e.get('id'):
@@ -243,11 +258,17 @@ def tool_memory_append_raw(args: dict) -> dict:
 def tool_memory_append_decision(args: dict) -> dict:
     ns         = (args or {}).get('namespace', 'mirage-infra')
     content    = (args or {}).get('content', '')
+    decision   = (args or {}).get('decision', '')
+    rationale  = (args or {}).get('rationale', '')
     title      = (args or {}).get('title', '')
     importance = _safe_int((args or {}).get('importance', 3), 3)
     tags       = (args or {}).get('tags', [])
+    if not content and decision:
+        content = decision
+        if rationale:
+            content += "\n\nRationale:\n" + rationale
     if not content:
-        return {'error': 'content required'}
+        return {'error': 'content required', 'hint': 'Use content, or decision+rationale'}
     entry_id = mem.append_entry(
         namespace=ns, type_='decision', content=content,
         title=title, importance=importance, tags=tags,
