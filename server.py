@@ -197,7 +197,14 @@ class MCPHandler(BaseHTTPRequestHandler):
                 import tools.memory as mem_tools
                 from memory import store as mem_store
                 if action == 'bootstrap':
-                    result = mem_tools.TOOLS['memory_bootstrap']['handler']({'namespace': ns})
+                    args = {'namespace': ns}
+                    if 'max_chars' in qs:
+                        args['max_chars'] = qs.get('max_chars', ['800'])[0]
+                    if 'query' in qs:
+                        args['query'] = qs.get('query', [''])[0]
+                    if 'top_n' in qs:
+                        args['top_n'] = qs.get('top_n', ['0'])[0]
+                    result = mem_tools.TOOLS['memory_bootstrap']['handler'](args)
                     self._send_json(200, result)
                 elif action == 'search':
                     q = qs.get('q', [''])[0]
