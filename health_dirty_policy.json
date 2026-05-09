@@ -7,7 +7,9 @@
     "tools/step6.py",
     "tools/task.py",
     "tools/vision.py",
-    "tools/windows_ops.py"
+    "tools/windows_ops.py",
+    "_classify_smoke.py",
+    "boundary.py"
   ],
-  "note": "Known pre-existing source changes in mcp-server-v2. git_dirty_report classifies these as known_dirty so mcp_health_report only raises source_dirty for new/unclassified source changes."
+  "note": "Known pre-existing source/untracked changes in mcp-server-v2. git_dirty_report classifies these as known_dirty so mcp_health_report only raises source_dirty/untracked_files for new/unclassified changes."
 }
