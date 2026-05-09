@@ -1033,6 +1033,127 @@ def tool_memory_contradiction_candidates(args: dict) -> dict:
 
 
 
+
+
+def tool_memory_fastembed_debug(args: dict) -> dict:
+    """Server-side introspection for fastembed/HNSW backend selection.
+    
+    Returns sys.executable, sys.path, memory_store.__file__,
+    import status, index paths, and actual backend selected for a sample query.
+    Essential for diagnosing "works locally but brute_force via MCP" issues.
+    """
+    import sys as _sys, os as _os
+    out = {}
+
+    # 1. Python runtime
+    out['sys_executable'] = _sys.executable
+    out['sys_path_first5'] = _sys.path[:5]
+    out['python_version'] = _sys.version.split()[0]
+
+    # 2. memory_store import chain
+    try:
+        import importlib
+        ms = importlib.import_module('memory_store')
+        out['memory_store_file'] = getattr(ms, '__file__', 'unknown')
+    except Exception as e:
+        out['memory_store_file'] = f'ERROR: {e}'
+
+    # 3. mirage-shared at front of sys.path?
+    ms_path = r'C:\MirageWork\mirage-shared'
+    out['mirage_shared_in_path'] = any(
+        _os.path.normcase(p) == _os.path.normcase(ms_path)
+        for p in _sys.path
+    )
+    out['mirage_shared_path_position'] = next(
+        (i for i, p in enumerate(_sys.path) if _os.path.normcase(p) == _os.path.normcase(ms_path)),
+        -1
+    )
+
+    # 4. fastembed import
+    try:
+        from fastembed import TextEmbedding
+        out['fastembed_ok'] = True
+        out['fastembed_file'] = TextEmbedding.__module__
+    except Exception as e:
+        out['fastembed_ok'] = False
+        out['fastembed_error'] = str(e)
+
+    # 5. usearch import
+    try:
+        from usearch.index import Index
+        out['usearch_ok'] = True
+        out['usearch_file'] = Index.__module__
+    except Exception as e:
+        out['usearch_ok'] = False
+        out['usearch_error'] = str(e)
+
+    # 6. index paths
+    try:
+        from memory_store import _FASTEMBED_INDEX_PATH, _HNSW_INDEX_PATH
+        fe_idx = _FASTEMBED_INDEX_PATH if _os.path.exists(_FASTEMBED_INDEX_PATH) else _FASTEMBED_INDEX_PATH + '.npz'
+        hnsw_idx = _HNSW_INDEX_PATH
+        out['fastembed_index_path'] = fe_idx
+        out['fastembed_index_exists'] = _os.path.exists(fe_idx)
+        out['fastembed_index_size_kb'] = _os.path.getsize(fe_idx) // 1024 if _os.path.exists(fe_idx) else 0
+        out['hnsw_index_path'] = hnsw_idx
+        out['hnsw_index_exists'] = _os.path.exists(hnsw_idx)
+        out['hnsw_index_size_kb'] = _os.path.getsize(hnsw_idx) // 1024 if _os.path.exists(hnsw_idx) else 0
+    except Exception as e:
+        out['index_path_error'] = str(e)
+
+    # 7. _hnsw_available() result
+    try:
+        from memory_store import _hnsw_available
+        out['hnsw_available_result'] = _hnsw_available()
+    except Exception as e:
+        out['hnsw_available_result'] = f'ERROR: {e}'
+
+    # 8. _use_hnsw decision
+    try:
+        from memory_store import _HNSW_INDEX_PATH as _hip, _hnsw_available as _ha
+        out['use_hnsw_would_be'] = _os.path.exists(_hip) and _ha()
+    except Exception as e:
+        out['use_hnsw_would_be'] = f'ERROR: {e}'
+
+    # 9. Actual backend for sample query (tiny, just to get backend field)
+    try:
+        from memory_store import fastembed_search
+        sample = fastembed_search('test', limit=1, min_score=0.0)
+        out['sample_backend'] = sample.get('backend', 'unknown')
+        out['sample_error'] = sample.get('error', None)
+        out['fallback_reason'] = (
+            'HNSW not available (_hnsw_available=False)'
+            if not out.get('hnsw_available_result')
+            else 'HNSW exception (see hnsw_error.log)'
+            if sample.get('backend') == 'fastembed_brute_force'
+            else None
+        )
+    except Exception as e:
+        out['sample_backend'] = f'ERROR: {e}'
+
+    # 10. operator summary
+    issues = []
+    if not out.get('fastembed_ok'):
+        issues.append('fastembed import failed')
+    if not out.get('usearch_ok'):
+        issues.append('usearch import failed')
+    if not out.get('hnsw_available_result'):
+        issues.append('_hnsw_available=False')
+    if not out.get('fastembed_index_exists'):
+        issues.append('fastembed index missing')
+    if not out.get('hnsw_index_exists'):
+        issues.append('HNSW index missing')
+    if out.get('sample_backend') == 'fastembed_brute_force':
+        issues.append(f'using brute_force (reason: {out.get("fallback_reason", "unknown")})')
+
+    out['operator_summary'] = (
+        f'backend={out.get("sample_backend")}; {"; ".join(issues)}'
+        if issues else
+        f'backend={out.get("sample_backend")}; all checks ok'
+    )
+    return out
+
+
 def tool_memory_hnsw_rebuild(args: dict) -> dict:
     """Build usearch HNSW index from existing fastembed .npz index.
     Fast ANN search, no MSVC required. Run after fastembed_rebuild."""
@@ -3511,6 +3632,11 @@ TOOLS = {
             'note':          {'type':'string'},
         }},
         'handler': tool_memory_link_create,
+    },
+    'memory_fastembed_debug': {
+        'description': 'Server-side introspection for fastembed/HNSW: sys.executable, sys.path, memory_store.__file__, import status, index paths, backend selection, fallback_reason.',
+        'handler': tool_memory_fastembed_debug,
+        'schema': {'type': 'object', 'properties': {}, 'required': []},
     },
     'memory_hnsw_rebuild': {
         'description': 'Build usearch HNSW index from fastembed .npz for fast ANN search. Run after fastembed_rebuild.',
