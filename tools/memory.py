@@ -1031,6 +1031,23 @@ def tool_memory_contradiction_candidates(args: dict) -> dict:
 
 
 
+
+
+def tool_memory_hnsw_rebuild(args: dict) -> dict:
+    """Build usearch HNSW index from existing fastembed .npz index.
+    Fast ANN search, no MSVC required. Run after fastembed_rebuild."""
+    import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+    from memory_store import hnsw_rebuild
+    return hnsw_rebuild()
+
+
+def tool_memory_hnsw_status(args: dict) -> dict:
+    """Check usearch HNSW index status."""
+    import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+    from memory_store import hnsw_status
+    return hnsw_status()
+
+
 def tool_memory_fastembed_rebuild(args: dict) -> dict:
     """Build fastembed index using true embedding model (BAAI/bge-small-en-v1.5, 384dim).
     Requires C:\MirageWork\venv\memory-win\Scripts\python.exe with fastembed installed."""
@@ -1185,6 +1202,71 @@ def tool_memory_link_promotion_review(args: dict) -> dict:
         }
     finally:
         con_l.close()
+
+
+
+
+def tool_memory_link_bulk_promote(args: dict) -> dict:
+    """Bulk promote high-confidence related_auto links automatically.
+    
+    Safe automation: only promotes when ALL of these are true:
+      - score >= min_score (default 0.95)
+      - promote_to != 'keep_auto'
+      - both entries are decision type
+      - hub_count >= min_hub (default 5)
+    
+    All promotions are related_manual (not supersedes/supports/contradicts).
+    Explicit semantic links still require manual review.
+    dry_run=true by default.
+    """
+    min_score = float((args or {}).get('min_score', 0.95))
+    min_hub   = int((args or {}).get('min_hub', 5))
+    dry_run   = (args or {}).get('dry_run', True)
+    limit     = int((args or {}).get('limit', 50))
+
+    # Get candidates
+    cands_result = tool_memory_link_promotion_candidates({'limit': limit * 2, 'min_score': min_score})
+    candidates = cands_result.get('candidates', [])
+
+    # Filter for safe auto-promotion
+    safe = [
+        c for c in candidates
+        if (
+            float(c.get('score', 0)) >= min_score
+            and 'hub_count' in ' '.join(str(r) for r in c.get('reasons', []))
+            and int([r for r in c.get('reasons', []) if 'hub_count' in str(r)][0].split('=')[1]) >= min_hub
+            if any('hub_count' in str(r) for r in c.get('reasons', []))
+            else False
+        )
+        and c.get('promote_to') not in ('keep_auto', 'supersedes', 'supports', 'contradicts')
+    ]
+
+    if not safe:
+        return {
+            'operator_summary': f'no safe auto-promotion candidates (min_score={min_score}, min_hub={min_hub})',
+            'candidate_count': len(candidates),
+            'safe_count': 0,
+            'dry_run': dry_run,
+            'promoted': [],
+        }
+
+    decisions = [
+        {'link_id': c['link_id'], 'action': 'approve', 'promote_to': 'related_manual',
+         'note': f'bulk_promote: score={c.get("score","")}, hub_count in {c.get("reasons",[])}'}
+        for c in safe[:limit]
+    ]
+
+    result = tool_memory_link_promotion_review({'decisions': decisions, 'dry_run': dry_run})
+
+    return {
+        'operator_summary': f'{"[DRY RUN] " if dry_run else ""}bulk promoted {result.get("approved_count",0)} related_manual links (safe: score>={min_score}, hub>={min_hub})',
+        'candidate_count': len(candidates),
+        'safe_count': len(safe),
+        'dry_run': dry_run,
+        'approved_count': result.get('approved_count', 0),
+        'rejected_count': result.get('rejected_count', 0),
+        'promoted': [r for r in result.get('results', []) if r.get('status') in ('promoted', 'would_promote')],
+    }
 
 
 def tool_memory_contradiction_review(args: dict) -> dict:
@@ -2591,6 +2673,14 @@ def tool_memory_maintenance(args: dict) -> dict:
                 'args': {'limit': 5000},
                 'reason': maintenance.get('semantic_lite_rebuild_reason', ''),
             })
+        # fastembed_rebuild: planned when recommended, executed only with allow_auto + !dry_run + max_runtime >= 120
+        if maintenance.get('fastembed_rebuild_recommended'):
+            planned.append({
+                'action': 'memory_fastembed_rebuild',
+                'args': {},
+                'reason': maintenance.get('fastembed_rebuild_reason', ''),
+                'note': 'slow (~90s); requires allow_auto=true + dry_run=false + max_runtime_sec>=120',
+            })
         result = {
             'namespace': ns,
             'allow_auto': allow_auto,
@@ -2642,6 +2732,28 @@ def tool_memory_maintenance(args: dict) -> dict:
                 'duration_sec': round(time.time() - started, 3),
                 'result': rebuild,
             })
+        # fastembed_rebuild: execute only if recommended AND max_runtime allows
+        if (maintenance.get('fastembed_rebuild_recommended')
+                and max_runtime_sec >= 120
+                and not maintenance.get('compact_recommended')  # don't run both in one pass
+                and not maintenance.get('semantic_lite_rebuild_recommended')):
+            started = time.time()
+            fastembed_result = tool_memory_fastembed_rebuild({})
+            result['executed'].append({
+                'action': 'memory_fastembed_rebuild',
+                'args': {},
+                'duration_sec': round(time.time() - started, 3),
+                'result': fastembed_result,
+            })
+            # Also rebuild HNSW if fastembed succeeded
+            if fastembed_result.get('ok'):
+                hnsw_result = tool_memory_hnsw_rebuild({})
+                result['executed'].append({
+                    'action': 'memory_hnsw_rebuild',
+                    'args': {},
+                    'duration_sec': 0,
+                    'result': hnsw_result,
+                })
         if result['executed']:
             result['operator_summary'] = (
                 'executed: ' + ', '.join(e.get('action', '') for e in result['executed'])
@@ -3400,6 +3512,16 @@ TOOLS = {
         }},
         'handler': tool_memory_link_create,
     },
+    'memory_hnsw_rebuild': {
+        'description': 'Build usearch HNSW index from fastembed .npz for fast ANN search. Run after fastembed_rebuild.',
+        'handler': tool_memory_hnsw_rebuild,
+        'schema': {'type': 'object', 'properties': {}, 'required': []},
+    },
+    'memory_hnsw_status': {
+        'description': 'Check usearch HNSW index status.',
+        'handler': tool_memory_hnsw_status,
+        'schema': {'type': 'object', 'properties': {}, 'required': []},
+    },
     'memory_fastembed_rebuild': {
         'description': 'Build fastembed true embedding index (BAAI/bge-small-en-v1.5, 384dim). Requires memory-win venv.',
         'handler': tool_memory_fastembed_rebuild,
@@ -3429,6 +3551,16 @@ TOOLS = {
             'decisions': {'type': 'array', 'description': 'List of {link_id, action: approve|reject|supersedes|supports|contradicts, promote_to?, note?}'},
             'dry_run': {'type': 'boolean', 'description': 'Preview without writing (default true)'},
         }, 'required': ['decisions']},
+    },
+    'memory_link_bulk_promote': {
+        'description': 'Safely auto-promote high-confidence related_auto to related_manual. Only score>=0.95 AND hub>=5 AND both decision. dry_run=true default.',
+        'handler': tool_memory_link_bulk_promote,
+        'schema': {'type': 'object', 'properties': {
+            'min_score': {'type': 'number', 'description': 'Minimum score (default 0.95)'},
+            'min_hub': {'type': 'integer', 'description': 'Minimum hub_count (default 5)'},
+            'limit': {'type': 'integer', 'description': 'Max promotions (default 50)'},
+            'dry_run': {'type': 'boolean', 'description': 'Preview without writing (default true)'},
+        }, 'required': []},
     },
     'memory_contradiction_review': {
         'description': 'Classify contradiction candidates as false_positive, supports, or contradicts. Creates explicit links. dry_run=true by default.',
