@@ -52,6 +52,8 @@ from config import PORT_NEW
 from fallback import call_fallback
 import tools.memory as memory_tools
 
+SERVER_STARTED_AT = time.time()
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(message)s',
@@ -90,6 +92,68 @@ import tools.ai       as ai_tools;        TOOLS.update(ai_tools.TOOLS)
 import tools.step6    as step6_tools;     TOOLS.update(step6_tools.TOOLS)
 
 log.info(f'Registered tools: {list(TOOLS.keys())}')
+
+
+def _file_age_sec(path: str):
+    try:
+        return round(max(0.0, time.time() - os.path.getmtime(path)), 3)
+    except Exception:
+        return None
+
+
+def _health_payload() -> dict:
+    """Return one-shot operational health without mutating memory state."""
+    warnings = []
+    memory_db_ok = False
+    semantic_lite_ok = False
+    maintenance_recommended_count = None
+
+    try:
+        import sqlite3
+        from memory import store as mem_store
+        db_path = getattr(mem_store, 'DB_PATH', r'C:\MirageWork\mcp-server\data\memory.db')
+        con = sqlite3.connect(db_path, timeout=2)
+        try:
+            con.execute('SELECT 1').fetchone()
+            memory_db_ok = True
+        finally:
+            con.close()
+    except Exception as e:
+        warnings.append(f'memory_db: {e}')
+
+    try:
+        from memory import store as mem_store
+        sem = mem_store.semantic_lite_status('mirage-infra')
+        semantic_lite_ok = bool(sem.get('exists')) and not bool(sem.get('error'))
+    except Exception as e:
+        warnings.append(f'semantic_lite: {e}')
+
+    try:
+        mon = TOOLS['memory_maintenance_monitor']['handler']({
+            'dry_run': True,
+            'allow_auto': False,
+            'max_runtime_sec': 10,
+        })
+        maintenance_recommended_count = int(mon.get('recommended_count') or 0)
+    except Exception as e:
+        warnings.append(f'maintenance_monitor: {e}')
+
+    return {
+        'name': 'mirage-mcp-v2',
+        'version': '1.0.0',
+        'port': PORT_NEW,
+        'tools': len(TOOLS),
+        'status': 'ok' if memory_db_ok else 'degraded',
+        'pid': os.getpid(),
+        'uptime_sec': round(time.time() - SERVER_STARTED_AT, 3),
+        'heartbeat_age_sec': _file_age_sec(HEARTBEAT_FILE),
+        'pid_file': PID_FILE,
+        'heartbeat_file': HEARTBEAT_FILE,
+        'memory_db_ok': memory_db_ok,
+        'semantic_lite_ok': semantic_lite_ok,
+        'maintenance_recommended_count': maintenance_recommended_count,
+        'warnings': warnings,
+    }
 
 # ---------------------------------------------------------------------------
 # MCP ハンドラ
@@ -159,13 +223,7 @@ class MCPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ('/', '/health'):
-            self._send_json(200, {
-                'name': 'mirage-mcp-v2',
-                'version': '1.0.0',
-                'port': PORT_NEW,
-                'tools': len(TOOLS),
-                'status': 'ok',
-            })
+            self._send_json(200, _health_payload())
         elif self.path == '/mcp':
             # SSE初期化用
             self._send_json(200, {'jsonrpc': '2.0', 'result': {}})
