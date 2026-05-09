@@ -275,6 +275,7 @@ def tool_mcp_health_report(args: dict) -> dict:
     v2_json = v2.get('json') or {}
     deep_json = (v2_deep or {}).get('json') or {}
     issues = []
+    warnings = []
     if not v1.get('ok'):
         issues.append('v1_health_unreachable')
     if not v2.get('ok'):
@@ -289,11 +290,14 @@ def tool_mcp_health_report(args: dict) -> dict:
         issues.append('maintenance_recommended')
     if git_report and int(git_report.get('source_dirty') or 0) > 0:
         issues.append('source_dirty')
+    if v1.get('ok') and 'v2_health_ms' not in v1_json:
+        warnings.append('v1_health_payload_outdated')
 
     status = 'ok' if not issues else 'degraded'
     return {
         'status': status,
         'issues': issues,
+        'warnings': warnings,
         'summary': {
             'v1_alive': bool(v1_json.get('v2_alive')) if v1.get('ok') else False,
             'v1_payload_has_detail': 'v2_health_ms' in v1_json,
