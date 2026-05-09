@@ -54,8 +54,10 @@ def tool_memory_compact(args: dict) -> dict:
 
     # Fetch recent raw entries (created_at 含む)
     msgs = mem.fetch_recent_raw(ns, window=window)
+    raw_count = len(msgs)
 
     # Mix in recent decisions
+    decision_count = 0
     try:
         dec_hits = mem.search(ns, query='', types=['decision'], limit=30)
         dec_msgs = []
@@ -67,7 +69,9 @@ def tool_memory_compact(args: dict) -> dict:
             })
         # Sort decisions newest first, then merge
         dec_msgs.sort(key=lambda x: x.get('created_at', 0), reverse=True)
-        msgs = dec_msgs[:20] + msgs
+        dec_msgs = dec_msgs[:20]
+        decision_count = len(dec_msgs)
+        msgs = dec_msgs + msgs
     except Exception:
         pass
 
@@ -81,6 +85,8 @@ def tool_memory_compact(args: dict) -> dict:
         prev_summary = prev.get('summary', '') or ''
     except Exception:
         pass
+    newest_entry_at = max((int(m.get('created_at') or 0) for m in msgs), default=0)
+    oldest_entry_at = min((int(m.get('created_at') or 0) for m in msgs if int(m.get('created_at') or 0)), default=0)
 
     job_id = str(uuid.uuid4())[:8]
     with _jobs_lock:
@@ -90,6 +96,7 @@ def tool_memory_compact(args: dict) -> dict:
         }
 
     def _run():
+        started = time.time()
         try:
             result = mem_compact.run(
                 ns, msgs,
@@ -105,9 +112,35 @@ def tool_memory_compact(args: dict) -> dict:
                     semantic_lite = mem.semantic_lite_rebuild(limit=5000)
                 except Exception as e:
                     semantic_lite = {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
+            sections = []
+            for line in (bootstrap or '').splitlines():
+                stripped = line.strip()
+                if stripped.startswith('■') or stripped.startswith('#'):
+                    sections.append(stripped[:80])
+            compact_report = {
+                'namespace': ns,
+                'entries_compacted': len(msgs),
+                'raw_entries': raw_count,
+                'decision_entries': decision_count,
+                'oldest_entry_at': oldest_entry_at,
+                'newest_entry_at': newest_entry_at,
+                'prev_summary_chars': len(prev_summary),
+                'new_summary_chars': len(bootstrap or ''),
+                'max_chars': max_chars,
+                'sections': sections[:12],
+                'semantic_lite_rebuild_requested': rebuild_semantic_lite,
+                'semantic_lite_rebuild_ran': semantic_lite is not None,
+                'duration_sec': round(time.time() - started, 3),
+                'warnings': [],
+            }
+            if not bootstrap:
+                compact_report['warnings'].append('compact returned empty bootstrap')
+            if result.get('error'):
+                compact_report['warnings'].append(str(result.get('error')))
             final = {**upd, 'error': result.get('error'),
                      'backend': 'llm.py', 'model': 'qwen-3-235b',
-                     'compact_version': 'v3'}
+                     'compact_version': 'v3',
+                     'compact_report': compact_report}
             if semantic_lite is not None:
                 final['semantic_lite_rebuild'] = semantic_lite
             with _jobs_lock:
