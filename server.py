@@ -233,6 +233,11 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._send_json(200, _health_payload())
         elif self.path == '/health/deep':
             self._send_json(200, _health_payload(deep=True))
+        elif self.path == '/health/report':
+            self._send_json(200, TOOLS['mcp_health_report']['handler']({
+                'include_git': True,
+                'include_deep': True,
+            }))
         elif self.path == '/mcp':
             # SSE初期化用
             self._send_json(200, {'jsonrpc': '2.0', 'result': {}})
