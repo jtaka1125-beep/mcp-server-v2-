@@ -20,6 +20,7 @@ from memory_store import (
     salience_score,
     semantic_lite_rebuild,
     semantic_lite_search,
+    semantic_lite_status,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     'salience_score',
     'semantic_lite_rebuild',
     'semantic_lite_search',
+    'semantic_lite_status',
 ]

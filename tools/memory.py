@@ -50,6 +50,7 @@ def tool_memory_compact(args: dict) -> dict:
     ns        = (args or {}).get('namespace', 'mirage-infra')
     max_chars = int((args or {}).get('max_chars', 2000) or 2000)
     window    = int((args or {}).get('window', 100) or 100)
+    rebuild_semantic_lite = bool((args or {}).get('rebuild_semantic_lite', False))
 
     # Fetch recent raw entries (created_at 含む)
     msgs = mem.fetch_recent_raw(ns, window=window)
@@ -98,9 +99,17 @@ def tool_memory_compact(args: dict) -> dict:
             bootstrap = result.get('bootstrap', '')
             upd = mem.compact_update_bootstrap(ns, bootstrap, max_chars=max_chars) \
                   if bootstrap else {'updated': False}
+            semantic_lite = None
+            if rebuild_semantic_lite:
+                try:
+                    semantic_lite = mem.semantic_lite_rebuild(limit=5000)
+                except Exception as e:
+                    semantic_lite = {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
             final = {**upd, 'error': result.get('error'),
                      'backend': 'llm.py', 'model': 'qwen-3-235b',
                      'compact_version': 'v3'}
+            if semantic_lite is not None:
+                final['semantic_lite_rebuild'] = semantic_lite
             with _jobs_lock:
                 _jobs[job_id]['state'] = 'done'
                 _jobs[job_id]['result'] = final
@@ -1416,6 +1425,16 @@ def tool_memory_semantic_lite_rebuild(args: dict) -> dict:
         return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
 
 
+def tool_memory_semantic_lite_status(args: dict) -> dict:
+    """Return semantic-lite index freshness and build metadata."""
+    ns = (args or {}).get('namespace', None)
+    try:
+        from memory import store as mem_store
+        return mem_store.semantic_lite_status(namespace=ns)
+    except Exception as e:
+        return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
+
+
 def tool_memory_semantic_lite_search(args: dict) -> dict:
     """Search dependency-light hashed n-gram vector index."""
     query = (args or {}).get('query', '')
@@ -1937,6 +1956,7 @@ TOOLS = {
             'namespace': {'type': 'string'},
             'max_chars': {'type': 'integer'},
             'window': {'type': 'integer'},
+            'rebuild_semantic_lite': {'type': 'boolean'},
         }},
         'handler': tool_memory_compact,
     },
@@ -2177,6 +2197,13 @@ TOOLS = {
             'limit':     {'type': 'integer'},
         }},
         'handler': tool_memory_semantic_lite_rebuild,
+    },
+    'memory_semantic_lite_status': {
+        'description': 'Return semantic-lite index freshness, stale count, and build metadata',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+        }},
+        'handler': tool_memory_semantic_lite_status,
     },
     'memory_semantic_lite_search': {
         'description': 'Search semantic-lite hashed n-gram vector index (numpy cosine over token/ngram vectors)',
