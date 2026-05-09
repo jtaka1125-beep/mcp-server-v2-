@@ -222,6 +222,14 @@ def tool_memory_compact(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # memory_compact_status
 # ---------------------------------------------------------------------------
+def _compact_status_trust_fields() -> dict:
+    return {
+        'completion_verification_required': True,
+        'verification_hint': 'Confirm applied memory state with memory_bootstrap freshness_level and since_last_compact.',
+        'trust_boundary': 'compact_status tracks worker/job state; bootstrap freshness confirms the memory state readers will see.',
+    }
+
+
 def tool_memory_compact_status(args: dict) -> dict:
     job_id = (args or {}).get('job_id', '')
     with _jobs_lock:
@@ -239,6 +247,7 @@ def tool_memory_compact_status(args: dict) -> dict:
                     'elapsed_sec': round(time.time() - started, 1),
                     'result': snap.get('result'),
                     'source': 'persistent_snapshot',
+                    **_compact_status_trust_fields(),
                 }
             return {
                 'job_id': job_id, 'state': job['state'],
@@ -246,6 +255,7 @@ def tool_memory_compact_status(args: dict) -> dict:
                 'elapsed_sec': round(time.time() - job['started_at'], 1),
                 'result': job.get('result'),
                 'source': 'process_registry',
+                **_compact_status_trust_fields(),
             }
         jobs = {
             k: {'state': v['state'], 'namespace': v['namespace'],
@@ -263,7 +273,7 @@ def tool_memory_compact_status(args: dict) -> dict:
                 'elapsed_sec': round(time.time() - started, 1),
                 'source': 'persistent_snapshot',
             }
-        return {'jobs': jobs}
+        return {'jobs': jobs, **_compact_status_trust_fields()}
 
 # ---------------------------------------------------------------------------
 # memory_search
@@ -1561,6 +1571,30 @@ def _resolve_semantic_search_backend(args: dict) -> dict:
     }
 
 
+def _semantic_search_trust_fields(method: str, use_semantic_lite: bool, use_llm: bool) -> dict:
+    if use_llm:
+        strength = 'llm_rerank_over_candidates'
+        basis = 'LLM rerank over FTS/semantic_lite retrieval candidates; not independent proof.'
+        status = 'ranked_candidate'
+    elif use_semantic_lite:
+        strength = 'hashed_ngram'
+        basis = 'semantic_lite hashed token/ngram cosine; not a true embedding backend.'
+        status = 'candidate'
+    else:
+        strength = 'fts_lexical'
+        basis = 'FTS lexical match only.'
+        status = 'candidate'
+    return {
+        'epistemic_status': status,
+        'semantic_strength': strength,
+        'confidence_basis': basis,
+        'confirmed_semantic_relation': False,
+        'trust_warning': (
+            f'{method} returns retrieval/ranking candidates. Inspect match_reason, score, and source content before treating as a relation.'
+        ),
+    }
+
+
 def tool_memory_semantic_search(args: dict) -> dict:
     """Semantic search: FTS candidates + LLM re-ranking for conceptual match.
     
@@ -1646,13 +1680,15 @@ def tool_memory_semantic_search(args: dict) -> dict:
         candidates = merged
     
     if not candidates or not use_llm or len(candidates) <= limit:
+        method = ('semantic_lite_only' if resolved_backend == 'semantic_lite' and lite_hits
+                  else 'semantic_lite_plus_fts' if use_semantic_lite and lite_hits
+                  else 'fts_only')
         out = {
             'hits': candidates[:limit],
-            'method': ('semantic_lite_only' if resolved_backend == 'semantic_lite' and lite_hits
-                       else 'semantic_lite_plus_fts' if use_semantic_lite and lite_hits
-                       else 'fts_only'),
+            'method': method,
             'backend': backend,
             'total_candidates': len(candidates),
+            **_semantic_search_trust_fields(method, use_semantic_lite, False),
         }
         if use_semantic_lite:
             out['semantic_lite_candidates'] = len(lite_hits)
@@ -1712,6 +1748,7 @@ JSON only, no explanation."""
                 'total_candidates': len(candidates),
                 'model': 'qwen-3-235b',
                 'semantic_lite_candidates': len(lite_hits) if use_semantic_lite else 0,
+                **_semantic_search_trust_fields('semantic_llm_rerank', use_semantic_lite, True),
             }
     except Exception as e:
         pass  # Degrade to FTS gracefully
@@ -1724,6 +1761,7 @@ JSON only, no explanation."""
         'backend': backend,
         'total_candidates': len(candidates),
     }
+    out.update(_semantic_search_trust_fields(out['method'], use_semantic_lite, False))
     if use_semantic_lite:
         out['semantic_lite_candidates'] = len(lite_hits)
         if lite_error:
@@ -1793,6 +1831,13 @@ def tool_memory_semantic_backend_status(args: dict) -> dict:
         'current_backend': current,
         'target_backend': 'fastembed_hnsw',
         'target_ready': target_ready,
+        'epistemic_status': 'limited_semantic' if current == 'semantic_lite_hashed_ngrams' else 'lexical_only',
+        'current_backend_trust': 'candidate_only',
+        'known_limitations': [
+            'semantic_lite_hashed_ngrams is token/ngram cosine, not a true embedding model',
+            'cross_namespace_hints and related_hints remain candidates until source content is inspected',
+            'fastembed_hnsw is not active until both fastembed and hnswlib are available in the V2 runtime',
+        ],
         'backends': [
             {'name': 'fts', 'available': True},
             {'name': 'semantic_lite_hashed_ngrams', 'available': numpy_ok, 'numpy_version': numpy_version},
@@ -1803,6 +1848,56 @@ def tool_memory_semantic_backend_status(args: dict) -> dict:
             'implement fastembed_hnsw index/search'
             if target_ready else 'install fastembed and hnswlib in the V2 runtime before backend swap'
         ),
+    }
+
+
+def tool_memory_trust_report(args: dict) -> dict:
+    """Summarize known external-memory trust boundaries for operators and agents."""
+    backend = tool_memory_semantic_backend_status({})
+    compact = tool_memory_compact_status({})
+    return {
+        'operator_summary': 'external memory is usable; treat relation/search hints as candidates unless verified by source content',
+        'trust_boundaries': [
+            {
+                'area': 'cross_namespace_hints',
+                'epistemic_status': 'candidate',
+                'confidence_basis': 'lexical_match',
+                'safe_reading': 'possible relation only; do not treat as confirmed connection',
+                'upgrade_path': 'fastembed_hnsw backend plus source-content inspection',
+            },
+            {
+                'area': 'memory_semantic_search',
+                'epistemic_status': backend.get('epistemic_status', 'limited_semantic'),
+                'confidence_basis': backend.get('current_backend', 'unknown'),
+                'safe_reading': 'retrieval/ranking candidates; inspect match_reason, score, and content',
+                'upgrade_path': 'install and activate fastembed+hnswlib in the V2 runtime',
+            },
+            {
+                'area': 'memory_compact_status',
+                'epistemic_status': 'job_state_observable',
+                'confidence_basis': 'process registry or persistent job snapshot',
+                'safe_reading': 'job completion indicates compact worker state; bootstrap freshness confirms applied reader state',
+                'upgrade_path': 'continue checking compact_status together with memory_bootstrap freshness',
+            },
+            {
+                'area': 'related_hints/supersede_candidates',
+                'epistemic_status': 'candidate',
+                'confidence_basis': 'term overlap and explicit supersede words',
+                'safe_reading': 'review manually before archive/supersede operations',
+                'upgrade_path': 'add verified relation classifier only after fastembed backend is active',
+            },
+        ],
+        'semantic_backend': backend,
+        'compact_status_trust': {
+            'completion_verification_required': compact.get('completion_verification_required'),
+            'verification_hint': compact.get('verification_hint'),
+            'trust_boundary': compact.get('trust_boundary'),
+        },
+        'required_operator_checks': [
+            'For cross-namespace hints: read source entries before assuming a real relation.',
+            'For semantic hits: treat score as retrieval confidence, not truth.',
+            'For compact: check compact_status and then bootstrap freshness_level/since_last_compact.',
+        ],
     }
 
 
@@ -2760,6 +2855,11 @@ TOOLS = {
         'description': 'Report semantic backend availability: FTS, semantic_lite, fastembed, hnswlib',
         'schema': {'type': 'object', 'properties': {}},
         'handler': tool_memory_semantic_backend_status,
+    },
+    'memory_trust_report': {
+        'description': 'Summarize external-memory trust boundaries and safe interpretation rules',
+        'schema': {'type': 'object', 'properties': {}},
+        'handler': tool_memory_trust_report,
     },
     'memory_maintenance': {
         'description': 'Return memory maintenance recommendation; execute only when allow_auto=true and dry_run=false',
