@@ -134,12 +134,29 @@ def tool_git_status(args: dict) -> dict:
         return {'error': str(e)}
 
 
-def _classify_git_status_line(line: str) -> dict:
+def _load_git_dirty_policy(repo: str) -> dict:
+    path = os.path.join(repo, 'health_dirty_policy.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        known = data.get('known_dirty_paths') or []
+        return {
+            'path': path,
+            'known_dirty_paths': {str(p).replace('\\', '/') for p in known},
+        }
+    except Exception:
+        return {'path': path, 'known_dirty_paths': set()}
+
+
+def _classify_git_status_line(line: str, known_dirty_paths=None) -> dict:
+    known_dirty_paths = known_dirty_paths or set()
     status = line[:2]
     path = line[3:].strip() if len(line) > 3 else ''
     normalized = path.replace('\\', '/')
     category = 'source_changes'
-    if '__pycache__/' in normalized or normalized.endswith('.pyc'):
+    if normalized in known_dirty_paths:
+        category = 'known_dirty'
+    elif '__pycache__/' in normalized or normalized.endswith('.pyc'):
         category = 'generated_pycache'
     elif normalized.startswith('.pytest_cache/') or '/.pytest_cache/' in normalized:
         category = 'generated_cache'
@@ -170,6 +187,7 @@ def tool_git_dirty_report(args: dict) -> dict:
             'repo': repo,
             'ok': False,
             'dirty': False,
+            'policy_path': os.path.join(repo, 'health_dirty_policy.json'),
             'counts': {},
             'items': [],
         }
@@ -183,8 +201,13 @@ def tool_git_dirty_report(args: dict) -> dict:
             if r.returncode != 0:
                 item['error'] = (r.stderr or r.stdout)[-1000:]
             else:
+                policy = _load_git_dirty_policy(repo)
+                item['policy_path'] = policy['path']
                 lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-                classified = [_classify_git_status_line(ln) for ln in lines]
+                classified = [
+                    _classify_git_status_line(ln, policy['known_dirty_paths'])
+                    for ln in lines
+                ]
                 counts = {}
                 for c in classified:
                     counts[c['category']] = counts.get(c['category'], 0) + 1
@@ -196,12 +219,24 @@ def tool_git_dirty_report(args: dict) -> dict:
         reports.append(item)
     total_dirty = sum(sum(r.get('counts', {}).values()) for r in reports)
     source_dirty = sum(r.get('counts', {}).get('source_changes', 0) for r in reports)
+    known_dirty = sum(r.get('counts', {}).get('known_dirty', 0) for r in reports)
+    generated_dirty = sum(
+        r.get('counts', {}).get('generated_pycache', 0)
+        + r.get('counts', {}).get('generated_cache', 0)
+        + r.get('counts', {}).get('runtime_artifacts', 0)
+        for r in reports
+    )
+    scratch_dirty = sum(r.get('counts', {}).get('untracked_scratch', 0) for r in reports)
+    untracked_dirty = sum(r.get('counts', {}).get('untracked_files', 0) for r in reports)
     return {
         'ok': all(r.get('ok') for r in reports),
         'dirty': total_dirty > 0,
         'total_dirty': total_dirty,
         'source_dirty': source_dirty,
-        'generated_dirty': total_dirty - source_dirty,
+        'known_dirty': known_dirty,
+        'generated_dirty': generated_dirty,
+        'scratch_dirty': scratch_dirty,
+        'untracked_dirty': untracked_dirty,
         'repos': reports,
     }
 
@@ -270,7 +305,10 @@ def tool_mcp_health_report(args: dict) -> dict:
             'semantic_lite_ok': deep_json.get('semantic_lite_ok'),
             'maintenance_recommended_count': deep_json.get('maintenance_recommended_count'),
             'source_dirty': git_report.get('source_dirty') if git_report else None,
+            'known_dirty': git_report.get('known_dirty') if git_report else None,
             'generated_dirty': git_report.get('generated_dirty') if git_report else None,
+            'scratch_dirty': git_report.get('scratch_dirty') if git_report else None,
+            'untracked_dirty': git_report.get('untracked_dirty') if git_report else None,
         },
         'v1_health': v1,
         'v2_health': v2,

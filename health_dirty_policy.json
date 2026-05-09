@@ -1,0 +1,13 @@
+{
+  "known_dirty_paths": [
+    "backend_cli.py",
+    "llm.py",
+    "mcp_guard_v2.ps1",
+    "memory/compact.py",
+    "tools/step6.py",
+    "tools/task.py",
+    "tools/vision.py",
+    "tools/windows_ops.py"
+  ],
+  "note": "Known pre-existing source changes in mcp-server-v2. git_dirty_report classifies these as known_dirty so mcp_health_report only raises source_dirty for new/unclassified source changes."
+}
