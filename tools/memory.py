@@ -20,6 +20,62 @@ log = logging.getLogger(__name__)
 _jobs: dict = {}
 _jobs_lock = threading.Lock()
 
+
+def _compact_jobs_dir() -> str:
+    path = r'C:\MirageWork\mcp-server\data\compact_jobs'
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _compact_job_path(job_id: str) -> str:
+    safe = ''.join(ch for ch in str(job_id) if ch.isalnum() or ch in ('-', '_'))[:64]
+    return os.path.join(_compact_jobs_dir(), f'{safe}.json')
+
+
+def _write_compact_job_snapshot(job_id: str, job: dict) -> None:
+    try:
+        payload = dict(job)
+        payload['job_id'] = job_id
+        path = _compact_job_path(job_id)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp, path)
+    except Exception:
+        log.exception('failed to persist compact job snapshot')
+
+
+def _read_compact_job_snapshot(job_id: str) -> dict:
+    try:
+        path = _compact_job_path(job_id)
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        return {'job_id': job_id, 'state': 'error', 'result': {'error': str(e)}}
+
+
+def _recent_compact_job_snapshots(limit: int = 10) -> dict:
+    try:
+        files = sorted(
+            (os.path.join(_compact_jobs_dir(), name) for name in os.listdir(_compact_jobs_dir()) if name.endswith('.json')),
+            key=lambda p: os.path.getmtime(p),
+            reverse=True,
+        )[:limit]
+    except Exception:
+        return {}
+    out = {}
+    for path in files:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                item = json.load(f)
+            job_id = item.get('job_id') or os.path.splitext(os.path.basename(path))[0]
+            out[job_id] = item
+        except Exception:
+            continue
+    return out
+
 # ---------------------------------------------------------------------------
 # memory_bootstrap
 # ---------------------------------------------------------------------------
@@ -95,7 +151,9 @@ def tool_memory_compact(args: dict) -> dict:
         _jobs[job_id] = {
             'state': 'running', 'namespace': ns,
             'started_at': time.time(), 'result': None,
+            'persisted': True,
         }
+        _write_compact_job_snapshot(job_id, _jobs[job_id])
 
     def _run():
         started = time.time()
@@ -148,10 +206,14 @@ def tool_memory_compact(args: dict) -> dict:
             with _jobs_lock:
                 _jobs[job_id]['state'] = 'done'
                 _jobs[job_id]['result'] = final
+                _jobs[job_id]['finished_at'] = time.time()
+                _write_compact_job_snapshot(job_id, _jobs[job_id])
         except Exception as e:
             with _jobs_lock:
                 _jobs[job_id]['state'] = 'error'
                 _jobs[job_id]['result'] = {'error': str(e)}
+                _jobs[job_id]['finished_at'] = time.time()
+                _write_compact_job_snapshot(job_id, _jobs[job_id])
 
     threading.Thread(target=_run, daemon=True).start()
     return {'job_id': job_id, 'state': 'running', 'namespace': ns,
@@ -166,18 +228,42 @@ def tool_memory_compact_status(args: dict) -> dict:
         if job_id:
             job = _jobs.get(job_id)
             if not job:
-                return {'error': f'job {job_id} not found'}
+                snap = _read_compact_job_snapshot(job_id)
+                if not snap:
+                    return {'error': f'job {job_id} not found'}
+                started = float(snap.get('started_at') or time.time())
+                return {
+                    'job_id': job_id,
+                    'state': snap.get('state'),
+                    'namespace': snap.get('namespace'),
+                    'elapsed_sec': round(time.time() - started, 1),
+                    'result': snap.get('result'),
+                    'source': 'persistent_snapshot',
+                }
             return {
                 'job_id': job_id, 'state': job['state'],
                 'namespace': job['namespace'],
                 'elapsed_sec': round(time.time() - job['started_at'], 1),
                 'result': job.get('result'),
+                'source': 'process_registry',
             }
-        return {'jobs': {
+        jobs = {
             k: {'state': v['state'], 'namespace': v['namespace'],
-                'elapsed_sec': round(time.time() - v['started_at'], 1)}
+                'elapsed_sec': round(time.time() - v['started_at'], 1),
+                'source': 'process_registry'}
             for k, v in list(_jobs.items())[-10:]
-        }}
+        }
+        for k, v in _recent_compact_job_snapshots(limit=10).items():
+            if k in jobs:
+                continue
+            started = float(v.get('started_at') or time.time())
+            jobs[k] = {
+                'state': v.get('state'),
+                'namespace': v.get('namespace'),
+                'elapsed_sec': round(time.time() - started, 1),
+                'source': 'persistent_snapshot',
+            }
+        return {'jobs': jobs}
 
 # ---------------------------------------------------------------------------
 # memory_search
