@@ -1351,6 +1351,36 @@ JSON only, no explanation."""
     }
 
 
+def tool_memory_semantic_lite_rebuild(args: dict) -> dict:
+    """Build dependency-light hashed n-gram vector index for memory search."""
+    ns = (args or {}).get('namespace', None)
+    types = (args or {}).get('types', None)
+    limit = int((args or {}).get('limit', 5000) or 5000)
+    try:
+        from memory import store as mem_store
+        return mem_store.semantic_lite_rebuild(namespace=ns, types=types, limit=limit)
+    except Exception as e:
+        return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
+
+
+def tool_memory_semantic_lite_search(args: dict) -> dict:
+    """Search dependency-light hashed n-gram vector index."""
+    query = (args or {}).get('query', '')
+    ns = (args or {}).get('namespace', None)
+    types = (args or {}).get('types', None)
+    limit = int((args or {}).get('limit', 5) or 5)
+    min_score = float((args or {}).get('min_score', 0.05) or 0.05)
+    if not query:
+        return {'error': 'query required'}
+    try:
+        from memory import store as mem_store
+        return mem_store.semantic_lite_search(
+            query=query, namespace=ns, types=types, limit=limit, min_score=min_score
+        )
+    except Exception as e:
+        return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
+
+
 
 # ---------------------------------------------------------------------------
 # active_context - 今何が最優先か一発で返す (会話開始時の一発リカバリ)
@@ -2084,6 +2114,26 @@ TOOLS = {
             'fts_mult':  {'type': 'integer', 'description': 'FTS candidates = limit * fts_mult (default 4)'},
         }},
         'handler': tool_memory_semantic_search,
+    },
+    'memory_semantic_lite_rebuild': {
+        'description': 'Build semantic-lite hashed n-gram vector index (numpy only, no external model downloads)',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'types':     {'type': 'array', 'items': {'type': 'string'}},
+            'limit':     {'type': 'integer'},
+        }},
+        'handler': tool_memory_semantic_lite_rebuild,
+    },
+    'memory_semantic_lite_search': {
+        'description': 'Search semantic-lite hashed n-gram vector index (numpy cosine over token/ngram vectors)',
+        'schema': {'type': 'object', 'properties': {
+            'query':     {'type': 'string'},
+            'namespace': {'type': 'string'},
+            'types':     {'type': 'array', 'items': {'type': 'string'}},
+            'limit':     {'type': 'integer'},
+            'min_score': {'type': 'number'},
+        }},
+        'handler': tool_memory_semantic_lite_search,
     },
 
 }

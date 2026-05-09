@@ -18,6 +18,8 @@ from memory_store import (
     get_l1,
     touch_entry,
     salience_score,
+    semantic_lite_rebuild,
+    semantic_lite_search,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     'get_l1',
     'touch_entry',
     'salience_score',
+    'semantic_lite_rebuild',
+    'semantic_lite_search',
 ]
