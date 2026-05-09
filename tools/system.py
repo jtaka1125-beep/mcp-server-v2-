@@ -343,6 +343,10 @@ def tool_mcp_health_report(args: dict) -> dict:
             'maintenance_recommended_count': deep_json.get('maintenance_recommended_count'),
             'source_dirty': git_report.get('source_dirty') if git_report else None,
             'known_dirty': git_report.get('known_dirty') if git_report else None,
+            'known_dirty_policy_ok': (
+                git_report.get('source_dirty', 0) == 0
+                if git_report is not None else None
+            ),
             'generated_dirty': git_report.get('generated_dirty') if git_report else None,
             'scratch_dirty': git_report.get('scratch_dirty') if git_report else None,
             'untracked_dirty': git_report.get('untracked_dirty') if git_report else None,
