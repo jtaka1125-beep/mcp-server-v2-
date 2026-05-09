@@ -36,7 +36,7 @@ class TestMemorySemanticSearch:
                     'limit': 3, 'use_llm': False})
         assert 'hits' in result
         assert 'method' in result
-        assert result['method'] in ('fts_only', 'fts_fallback', 'semantic_llm_rerank')
+        assert result['method'] in ('semantic_lite_plus_fts', 'fts_only', 'fts_fallback', 'semantic_llm_rerank')
 
     def test_limit_respected(self):
         h = self._handler()
@@ -53,6 +53,26 @@ class TestMemorySemanticSearch:
         h = self._handler()
         result = h({'query': 'HEVC', 'use_llm': False})
         assert 'total_candidates' in result
+
+    def test_backend_fts(self):
+        h = self._handler()
+        result = h({'query': 'HEVC', 'backend': 'fts', 'limit': 2})
+        assert result.get('backend', {}).get('resolved') == 'fts'
+        assert result.get('backend', {}).get('use_llm') is False
+        assert result.get('backend', {}).get('use_semantic_lite') is False
+
+    def test_backend_semantic_lite(self):
+        h = self._handler()
+        result = h({'query': '外部記憶 使い心地', 'backend': 'semantic_lite', 'limit': 2})
+        assert result.get('backend', {}).get('resolved') == 'semantic_lite'
+        assert result.get('backend', {}).get('use_llm') is False
+        assert result.get('backend', {}).get('use_semantic_lite') is True
+
+    def test_invalid_backend(self):
+        h = self._handler()
+        result = h({'query': 'HEVC', 'backend': 'unknown'})
+        assert 'error' in result
+        assert 'valid_backends' in result
 
 
 class TestMemoryL0L1Tools:

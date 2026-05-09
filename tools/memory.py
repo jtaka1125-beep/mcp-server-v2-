@@ -1287,6 +1287,57 @@ def tool_memory_archive(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # memory_semantic_search (A1: Semantic Search via LLM re-ranking)
 # ---------------------------------------------------------------------------
+def _resolve_semantic_search_backend(args: dict) -> dict:
+    """Resolve explicit backend while preserving legacy use_llm flags."""
+    raw_backend = ((args or {}).get('backend') or 'auto')
+    backend = str(raw_backend).strip().lower().replace('-', '_')
+    aliases = {
+        'semantic': 'semantic_lite',
+        'lite': 'semantic_lite',
+        'semantic_lite_plus_fts': 'hybrid',
+        'semantic_lite_fts': 'hybrid',
+        'fts_only': 'fts',
+        'llm_rerank': 'llm',
+        'semantic_llm_rerank': 'llm',
+    }
+    backend = aliases.get(backend, backend)
+    valid = {'auto', 'fts', 'semantic_lite', 'hybrid', 'llm'}
+    if backend not in valid:
+        return {
+            'error': f"invalid backend: {raw_backend}",
+            'valid_backends': sorted(valid),
+        }
+
+    legacy_use_llm = (args or {}).get('use_llm', None)
+    legacy_use_lite = (args or {}).get('use_semantic_lite', None)
+    if backend == 'auto':
+        use_llm = bool(legacy_use_llm) if legacy_use_llm is not None else True
+        use_semantic_lite = (not use_llm) if legacy_use_lite is None else bool(legacy_use_lite)
+        resolved = 'llm' if use_llm else ('hybrid' if use_semantic_lite else 'fts')
+    elif backend == 'fts':
+        use_llm = False
+        use_semantic_lite = False
+        resolved = 'fts'
+    elif backend == 'semantic_lite':
+        use_llm = False
+        use_semantic_lite = True
+        resolved = 'semantic_lite'
+    elif backend == 'hybrid':
+        use_llm = False
+        use_semantic_lite = True
+        resolved = 'hybrid'
+    else:  # llm
+        use_llm = True
+        use_semantic_lite = bool(legacy_use_lite) if legacy_use_lite is not None else True
+        resolved = 'llm'
+    return {
+        'requested': backend,
+        'resolved': resolved,
+        'use_llm': use_llm,
+        'use_semantic_lite': use_semantic_lite,
+    }
+
+
 def tool_memory_semantic_search(args: dict) -> dict:
     """Semantic search: FTS candidates + LLM re-ranking for conceptual match.
     
@@ -1299,7 +1350,8 @@ def tool_memory_semantic_search(args: dict) -> dict:
         namespace:  Optional namespace filter
         limit:      Number of results (default 5)
         types:      Optional type filter list
-        use_llm:    bool (default True) - enable LLM re-ranking
+        backend:    auto|fts|semantic_lite|hybrid|llm (default auto)
+        use_llm:    legacy bool (default True) - enable LLM re-ranking
         use_semantic_lite: bool - when true, include semantic-lite candidates.
                    If omitted, semantic-lite is used automatically when use_llm=false.
         fts_mult:   int (default 4) - FTS candidates = limit * fts_mult
@@ -1310,12 +1362,12 @@ def tool_memory_semantic_search(args: dict) -> dict:
     ns       = (args or {}).get('namespace', None)
     limit    = int((args or {}).get('limit', 5) or 5)
     types    = (args or {}).get('types', None)
-    use_llm  = bool((args or {}).get('use_llm', True))
-    use_semantic_lite = (args or {}).get('use_semantic_lite', None)
-    if use_semantic_lite is None:
-        use_semantic_lite = not use_llm
-    else:
-        use_semantic_lite = bool(use_semantic_lite)
+    backend = _resolve_semantic_search_backend(args or {})
+    if backend.get('error'):
+        return backend
+    use_llm = bool(backend['use_llm'])
+    use_semantic_lite = bool(backend['use_semantic_lite'])
+    resolved_backend = backend['resolved']
     fts_mult = int((args or {}).get('fts_mult', 4) or 4)
     
     if not query:
@@ -1325,7 +1377,9 @@ def tool_memory_semantic_search(args: dict) -> dict:
     
     # Step 1: FTS to get candidates
     fts_limit = min(limit * fts_mult, 40)
-    if ns:
+    if resolved_backend == 'semantic_lite':
+        raw = {'hits': []}
+    elif ns:
         raw = mem_store.search(ns, query=query, types=types, limit=fts_limit)
     else:
         raw = mem_store.search_all(query=query, types=types, limit=fts_limit)
@@ -1356,7 +1410,8 @@ def tool_memory_semantic_search(args: dict) -> dict:
             lite_hits = []
         merged = []
         seen_ids = set()
-        for h in lite_hits + candidates:
+        source_hits = lite_hits if resolved_backend == 'semantic_lite' else lite_hits + candidates
+        for h in source_hits:
             cid = h.get('id') if isinstance(h, dict) else None
             if cid:
                 if cid in seen_ids:
@@ -1370,7 +1425,10 @@ def tool_memory_semantic_search(args: dict) -> dict:
     if not candidates or not use_llm or len(candidates) <= limit:
         out = {
             'hits': candidates[:limit],
-            'method': 'semantic_lite_plus_fts' if use_semantic_lite and lite_hits else 'fts_only',
+            'method': ('semantic_lite_only' if resolved_backend == 'semantic_lite' and lite_hits
+                       else 'semantic_lite_plus_fts' if use_semantic_lite and lite_hits
+                       else 'fts_only'),
+            'backend': backend,
             'total_candidates': len(candidates),
         }
         if use_semantic_lite:
@@ -1427,6 +1485,7 @@ JSON only, no explanation."""
             return {
                 'hits': reranked,
                 'method': 'semantic_llm_rerank',
+                'backend': backend,
                 'total_candidates': len(candidates),
                 'model': 'qwen-3-235b',
                 'semantic_lite_candidates': len(lite_hits) if use_semantic_lite else 0,
@@ -1436,7 +1495,10 @@ JSON only, no explanation."""
     
     out = {
         'hits': candidates[:limit],
-        'method': 'semantic_lite_plus_fts_fallback' if use_semantic_lite and lite_hits else 'fts_fallback',
+        'method': ('semantic_lite_only_fallback' if resolved_backend == 'semantic_lite' and lite_hits
+                   else 'semantic_lite_plus_fts_fallback' if use_semantic_lite and lite_hits
+                   else 'fts_fallback'),
+        'backend': backend,
         'total_candidates': len(candidates),
     }
     if use_semantic_lite:
@@ -2288,12 +2350,13 @@ TOOLS = {
     },
 
     'memory_semantic_search': {
-        'description': 'A1: Semantic search via FTS + LLM re-ranking (no heavy deps, falls back gracefully)',
+        'description': 'A1: Semantic search via selectable backend: auto, fts, semantic_lite, hybrid, or llm',
         'schema': {'type': 'object', 'properties': {
             'query':     {'type': 'string'},
             'namespace': {'type': 'string'},
             'limit':     {'type': 'integer'},
             'types':     {'type': 'array', 'items': {'type': 'string'}},
+            'backend':   {'type': 'string', 'enum': ['auto', 'fts', 'semantic_lite', 'hybrid', 'llm']},
             'use_llm':   {'type': 'boolean'},
             'use_semantic_lite': {'type': 'boolean'},
             'fts_mult':  {'type': 'integer', 'description': 'FTS candidates = limit * fts_mult (default 4)'},
