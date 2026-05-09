@@ -1562,9 +1562,14 @@ def tool_memory_maintenance(args: dict) -> dict:
             'allow_auto': allow_auto,
             'dry_run': dry_run,
             'max_runtime_sec': max_runtime_sec,
+            'operator_summary': (
+                'maintenance required: ' + ', '.join(actions)
+                if actions else 'ok; no memory maintenance required'
+            ),
             'maintenance': maintenance,
             'semantic_lite': boot.get('semantic_lite'),
             'planned': planned,
+            'recommended_action_count': len(actions),
             'skipped_reason': '',
             'executed': [],
         }
@@ -1603,6 +1608,10 @@ def tool_memory_maintenance(args: dict) -> dict:
                 'duration_sec': round(time.time() - started, 3),
                 'result': rebuild,
             })
+        if result['executed']:
+            result['operator_summary'] = (
+                'executed: ' + ', '.join(e.get('action', '') for e in result['executed'])
+            )
         return result
     except Exception as e:
         return {'error': str(e), 'namespace': ns}
@@ -1667,6 +1676,10 @@ def tool_memory_maintenance_monitor(args: dict) -> dict:
         'dry_run': dry_run,
         'stop_after_first_execute': stop_after_first_execute,
         'duration_sec': round(time.time() - started, 3),
+        'operator_summary': (
+            f'maintenance required: {len(recommended)} action(s)'
+            if recommended else 'ok; no memory maintenance required across namespaces'
+        ),
         'recommended_count': len(recommended),
         'executed_count': executed_count,
         'recommended': recommended,
