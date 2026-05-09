@@ -188,6 +188,7 @@ def tool_git_dirty_report(args: dict) -> dict:
             'ok': False,
             'dirty': False,
             'policy_path': os.path.join(repo, 'health_dirty_policy.json'),
+            'warnings': [],
             'counts': {},
             'items': [],
         }
@@ -198,6 +199,8 @@ def tool_git_dirty_report(args: dict) -> dict:
                 encoding='utf-8', errors='replace',
             )
             item['ok'] = r.returncode == 0
+            stderr_lines = [ln.strip() for ln in (r.stderr or '').splitlines() if ln.strip()]
+            item['warnings'] = stderr_lines[:20]
             if r.returncode != 0:
                 item['error'] = (r.stderr or r.stdout)[-1000:]
             else:
@@ -228,6 +231,7 @@ def tool_git_dirty_report(args: dict) -> dict:
     )
     scratch_dirty = sum(r.get('counts', {}).get('untracked_scratch', 0) for r in reports)
     untracked_dirty = sum(r.get('counts', {}).get('untracked_files', 0) for r in reports)
+    git_warnings = sum(len(r.get('warnings') or []) for r in reports)
     return {
         'ok': all(r.get('ok') for r in reports),
         'dirty': total_dirty > 0,
@@ -237,6 +241,7 @@ def tool_git_dirty_report(args: dict) -> dict:
         'generated_dirty': generated_dirty,
         'scratch_dirty': scratch_dirty,
         'untracked_dirty': untracked_dirty,
+        'git_warnings': git_warnings,
         'repos': reports,
     }
 
@@ -292,6 +297,8 @@ def tool_mcp_health_report(args: dict) -> dict:
         issues.append('source_dirty')
     if v1.get('ok') and 'v2_health_ms' not in v1_json:
         warnings.append('v1_health_payload_outdated')
+    if git_report and int(git_report.get('git_warnings') or 0) > 0:
+        warnings.append('git_status_warnings')
 
     status = 'ok' if not issues else 'degraded'
     return {
@@ -313,6 +320,7 @@ def tool_mcp_health_report(args: dict) -> dict:
             'generated_dirty': git_report.get('generated_dirty') if git_report else None,
             'scratch_dirty': git_report.get('scratch_dirty') if git_report else None,
             'untracked_dirty': git_report.get('untracked_dirty') if git_report else None,
+            'git_warnings': git_report.get('git_warnings') if git_report else None,
         },
         'v1_health': v1,
         'v2_health': v2,
