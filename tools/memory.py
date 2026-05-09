@@ -1435,6 +1435,40 @@ def tool_memory_semantic_lite_status(args: dict) -> dict:
         return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
 
 
+def tool_memory_maintenance(args: dict) -> dict:
+    """Return maintenance recommendation, optionally execute recommended actions."""
+    ns = (args or {}).get('namespace', 'mirage-infra')
+    allow_auto = bool((args or {}).get('allow_auto', False))
+    try:
+        from memory import store as mem_store
+        boot = mem_store.get_bootstrap(ns, max_chars=240)
+        maintenance = boot.get('maintenance') or {}
+        actions = maintenance.get('recommended_actions') or []
+        result = {
+            'namespace': ns,
+            'allow_auto': allow_auto,
+            'maintenance': maintenance,
+            'semantic_lite': boot.get('semantic_lite'),
+            'executed': [],
+        }
+        if not allow_auto or not actions:
+            return result
+
+        if maintenance.get('compact_recommended'):
+            compact_args = {
+                'namespace': ns,
+                'rebuild_semantic_lite': bool(maintenance.get('semantic_lite_rebuild_recommended')),
+            }
+            compact_result = tool_memory_compact(compact_args)
+            result['executed'].append({'action': 'memory_compact', 'result': compact_result})
+        elif maintenance.get('semantic_lite_rebuild_recommended'):
+            rebuild = mem_store.semantic_lite_rebuild(limit=5000)
+            result['executed'].append({'action': 'memory_semantic_lite_rebuild', 'result': rebuild})
+        return result
+    except Exception as e:
+        return {'error': str(e), 'namespace': ns}
+
+
 def tool_memory_semantic_lite_search(args: dict) -> dict:
     """Search dependency-light hashed n-gram vector index."""
     query = (args or {}).get('query', '')
@@ -2204,6 +2238,14 @@ TOOLS = {
             'namespace': {'type': 'string'},
         }},
         'handler': tool_memory_semantic_lite_status,
+    },
+    'memory_maintenance': {
+        'description': 'Return memory maintenance recommendation; execute only when allow_auto=true',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'allow_auto': {'type': 'boolean'},
+        }},
+        'handler': tool_memory_maintenance,
     },
     'memory_semantic_lite_search': {
         'description': 'Search semantic-lite hashed n-gram vector index (numpy cosine over token/ngram vectors)',
