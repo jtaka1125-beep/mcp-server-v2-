@@ -846,10 +846,10 @@ def tool_memory_link_health(args: dict) -> dict:
         by_strength = {
             'related_auto': 0,
             'related_manual': 0,
-            'supports': by_type.get('supports', 0),
-            'supersedes': by_type.get('supersedes', 0),
-            'contradicts': by_type.get('contradicts', 0),
-            'consolidated_into': by_type.get('consolidated_into', 0),
+            'supports': 0,
+            'supersedes': 0,
+            'contradicts': 0,
+            'consolidated_into': 0,
         }
         for rel, note, count in con.execute(
             'SELECT relation_type, COALESCE(note, ""), COUNT(*) FROM links GROUP BY relation_type, COALESCE(note, "")'
