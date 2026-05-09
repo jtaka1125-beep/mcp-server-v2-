@@ -162,6 +162,13 @@ def _health_payload(deep: bool = False) -> dict:
     })
     return payload
 
+
+def _query_bool(qs: dict, name: str, default: bool) -> bool:
+    raw = (qs.get(name) or [None])[0]
+    if raw is None:
+        return default
+    return str(raw).strip().lower() not in ('0', 'false', 'no', 'off')
+
 # ---------------------------------------------------------------------------
 # MCP ハンドラ
 # ---------------------------------------------------------------------------
@@ -229,19 +236,23 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path in ('/', '/health'):
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        path = parsed.path
+        if path in ('/', '/health'):
             self._send_json(200, _health_payload())
-        elif self.path == '/health/deep':
+        elif path == '/health/deep':
             self._send_json(200, _health_payload(deep=True))
-        elif self.path == '/health/report':
+        elif path == '/health/report':
             self._send_json(200, TOOLS['mcp_health_report']['handler']({
-                'include_git': True,
-                'include_deep': True,
+                'include_git': _query_bool(qs, 'include_git', True),
+                'include_deep': _query_bool(qs, 'include_deep', True),
             }))
-        elif self.path == '/mcp':
+        elif path == '/mcp':
             # SSE初期化用
             self._send_json(200, {'jsonrpc': '2.0', 'result': {}})
-        elif self.path.startswith('/api/'):
+        elif path.startswith('/api/'):
             # Handle /api/* directly in V2
             self._handle_api_route(self.path)
         else:
