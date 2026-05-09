@@ -301,8 +301,34 @@ def tool_mcp_health_report(args: dict) -> dict:
         warnings.append('git_status_warnings')
 
     status = 'ok' if not issues else 'degraded'
+
+    # P0: operator_summary - 1-line natural language summary for humans / commander AI
+    def _operator_summary(status, issues, warnings):
+        if status == 'down':
+            return 'down; immediate action required'
+        if status == 'degraded':
+            issue_str = ', '.join(issues)
+            if warnings:
+                warn_str = ', '.join(warnings)
+                return f'degraded; action required: {issue_str}; also: {warn_str}'
+            return f'degraded; action required: {issue_str}'
+        # status == 'ok'
+        if not warnings:
+            return 'ok; all systems clean'
+        if len(warnings) == 1:
+            w = warnings[0]
+            hints = {
+                'v1_health_payload_outdated': 'outdated V1 payload (resolves on next V1 restart)',
+                'git_status_warnings': 'git status has warnings (check git_dirty_report)',
+            }
+            desc = hints.get(w, w)
+            return f'ok; warning: {desc}; no action required'
+        warn_str = ', '.join(warnings)
+        return f'ok; {len(warnings)} warnings ({warn_str}); no action required'
+
     return {
         'status': status,
+        'operator_summary': _operator_summary(status, issues, warnings),
         'issues': issues,
         'warnings': warnings,
         'summary': {
