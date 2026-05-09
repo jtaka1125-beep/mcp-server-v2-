@@ -1439,31 +1439,75 @@ def tool_memory_maintenance(args: dict) -> dict:
     """Return maintenance recommendation, optionally execute recommended actions."""
     ns = (args or {}).get('namespace', 'mirage-infra')
     allow_auto = bool((args or {}).get('allow_auto', False))
+    dry_run = bool((args or {}).get('dry_run', True))
+    max_runtime_sec = int((args or {}).get('max_runtime_sec', 120) or 120)
     try:
         from memory import store as mem_store
         boot = mem_store.get_bootstrap(ns, max_chars=240)
         maintenance = boot.get('maintenance') or {}
         actions = maintenance.get('recommended_actions') or []
+        planned = []
+        if maintenance.get('compact_recommended'):
+            planned.append({
+                'action': 'memory_compact',
+                'args': {
+                    'namespace': ns,
+                    'rebuild_semantic_lite': bool(maintenance.get('semantic_lite_rebuild_recommended')),
+                },
+                'reason': maintenance.get('compact_reason', ''),
+            })
+        elif maintenance.get('semantic_lite_rebuild_recommended'):
+            planned.append({
+                'action': 'memory_semantic_lite_rebuild',
+                'args': {'limit': 5000},
+                'reason': maintenance.get('semantic_lite_rebuild_reason', ''),
+            })
         result = {
             'namespace': ns,
             'allow_auto': allow_auto,
+            'dry_run': dry_run,
+            'max_runtime_sec': max_runtime_sec,
             'maintenance': maintenance,
             'semantic_lite': boot.get('semantic_lite'),
+            'planned': planned,
+            'skipped_reason': '',
             'executed': [],
         }
-        if not allow_auto or not actions:
+        if not actions:
+            result['skipped_reason'] = 'no recommended actions'
+            return result
+        if not allow_auto:
+            result['skipped_reason'] = 'allow_auto=false'
+            return result
+        if dry_run:
+            result['skipped_reason'] = 'dry_run=true'
             return result
 
         if maintenance.get('compact_recommended'):
+            started = time.time()
             compact_args = {
                 'namespace': ns,
                 'rebuild_semantic_lite': bool(maintenance.get('semantic_lite_rebuild_recommended')),
             }
             compact_result = tool_memory_compact(compact_args)
-            result['executed'].append({'action': 'memory_compact', 'result': compact_result})
+            result['executed'].append({
+                'action': 'memory_compact',
+                'args': compact_args,
+                'duration_sec': round(time.time() - started, 3),
+                'result': compact_result,
+            })
         elif maintenance.get('semantic_lite_rebuild_recommended'):
+            started = time.time()
+            if max_runtime_sec < 10:
+                result['skipped_reason'] = 'max_runtime_sec too small for semantic_lite_rebuild'
+                return result
             rebuild = mem_store.semantic_lite_rebuild(limit=5000)
-            result['executed'].append({'action': 'memory_semantic_lite_rebuild', 'result': rebuild})
+            result['executed'].append({
+                'action': 'memory_semantic_lite_rebuild',
+                'args': {'limit': 5000},
+                'duration_sec': round(time.time() - started, 3),
+                'result': rebuild,
+            })
         return result
     except Exception as e:
         return {'error': str(e), 'namespace': ns}
@@ -2240,10 +2284,12 @@ TOOLS = {
         'handler': tool_memory_semantic_lite_status,
     },
     'memory_maintenance': {
-        'description': 'Return memory maintenance recommendation; execute only when allow_auto=true',
+        'description': 'Return memory maintenance recommendation; execute only when allow_auto=true and dry_run=false',
         'schema': {'type': 'object', 'properties': {
             'namespace': {'type': 'string'},
             'allow_auto': {'type': 'boolean'},
+            'dry_run': {'type': 'boolean'},
+            'max_runtime_sec': {'type': 'integer'},
         }},
         'handler': tool_memory_maintenance,
     },
