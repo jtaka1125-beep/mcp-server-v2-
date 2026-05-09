@@ -133,6 +133,78 @@ def tool_git_status(args: dict) -> dict:
     except Exception as e:
         return {'error': str(e)}
 
+
+def _classify_git_status_line(line: str) -> dict:
+    status = line[:2]
+    path = line[3:].strip() if len(line) > 3 else ''
+    normalized = path.replace('\\', '/')
+    category = 'source_changes'
+    if '__pycache__/' in normalized or normalized.endswith('.pyc'):
+        category = 'generated_pycache'
+    elif normalized.startswith('.pytest_cache/') or '/.pytest_cache/' in normalized:
+        category = 'generated_cache'
+    elif status == '??':
+        lower = os.path.basename(normalized).lower()
+        if lower.startswith('_') or lower.startswith('scratch') or lower.endswith('_smoke.py'):
+            category = 'untracked_scratch'
+        else:
+            category = 'untracked_files'
+    elif normalized.endswith(('.log', '.pid', '.heartbeat')):
+        category = 'runtime_artifacts'
+    return {'status': status, 'path': path, 'category': category}
+
+
+def tool_git_dirty_report(args: dict) -> dict:
+    """Classify git dirty files so health checks can separate source changes from generated noise."""
+    repos = (args or {}).get('repos') or [
+        r'C:\MirageWork\mcp-server-v2',
+        r'C:\MirageWork\mcp-server',
+        r'C:\MirageWork\mirage-shared',
+    ]
+    if isinstance(repos, str):
+        repos = [p.strip() for p in repos.split(',') if p.strip()]
+    reports = []
+    for repo in repos:
+        repo = os.path.abspath(repo)
+        item = {
+            'repo': repo,
+            'ok': False,
+            'dirty': False,
+            'counts': {},
+            'items': [],
+        }
+        try:
+            r = subprocess.run(
+                ['git', 'status', '--short'],
+                capture_output=True, text=True, timeout=10, cwd=repo,
+                encoding='utf-8', errors='replace',
+            )
+            item['ok'] = r.returncode == 0
+            if r.returncode != 0:
+                item['error'] = (r.stderr or r.stdout)[-1000:]
+            else:
+                lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+                classified = [_classify_git_status_line(ln) for ln in lines]
+                counts = {}
+                for c in classified:
+                    counts[c['category']] = counts.get(c['category'], 0) + 1
+                item['dirty'] = bool(classified)
+                item['counts'] = counts
+                item['items'] = classified[:200]
+        except Exception as e:
+            item['error'] = str(e)
+        reports.append(item)
+    total_dirty = sum(sum(r.get('counts', {}).values()) for r in reports)
+    source_dirty = sum(r.get('counts', {}).get('source_changes', 0) for r in reports)
+    return {
+        'ok': all(r.get('ok') for r in reports),
+        'dirty': total_dirty > 0,
+        'total_dirty': total_dirty,
+        'source_dirty': source_dirty,
+        'generated_dirty': total_dirty - source_dirty,
+        'repos': reports,
+    }
+
 # ---------------------------------------------------------------------------
 # status (サーバー・デバイス全体状態)
 # ---------------------------------------------------------------------------
@@ -559,6 +631,13 @@ TOOLS = {
             'cwd': {'type': 'string'},
         }},
         'handler': tool_git_status,
+    },
+    'git_dirty_report': {
+        'description': 'Classify git dirty files into source changes, generated cache, pycache, runtime artifacts, and scratch files.',
+        'schema': {'type': 'object', 'properties': {
+            'repos': {'type': 'array', 'items': {'type': 'string'}},
+        }},
+        'handler': tool_git_dirty_report,
     },
     'status': {
         'description': 'Get MirageSystem overall status.',
