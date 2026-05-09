@@ -250,6 +250,8 @@ def tool_memory_append_raw(args: dict) -> dict:
         namespace=ns, type_='raw', content=content,
         role=role, importance=importance, tags=tags,
     )
+    if isinstance(entry_id, dict):
+        return {'success': True, **entry_id}
     return {'success': True, 'id': entry_id}
 
 # ---------------------------------------------------------------------------
@@ -273,6 +275,8 @@ def tool_memory_append_decision(args: dict) -> dict:
         namespace=ns, type_='decision', content=content,
         title=title, importance=importance, tags=tags,
     )
+    if isinstance(entry_id, dict):
+        return {'success': True, **entry_id}
     return {'success': True, 'id': entry_id}
 
 # ---------------------------------------------------------------------------
