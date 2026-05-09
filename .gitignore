@@ -30,3 +30,4 @@ install_*.ps1
 *.bak_* 
 *.old_* 
 v2_patch_ready.py 
+.pytest_cache/
