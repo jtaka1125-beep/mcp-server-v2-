@@ -7,6 +7,8 @@ import uuid
 import threading
 import time
 import logging
+import json
+import sqlite3
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -421,6 +423,141 @@ def tool_memory_active_decisions(args: dict) -> dict:
         return get_active_decisions(ns, limit=limit)
     except Exception as e:
         return {'error': str(e)}
+
+
+def _memory_db_path() -> str:
+    return r'C:\MirageWork\mcp-server\data\memory.db'
+
+
+def _parse_tags_arg(tags) -> list:
+    if not tags:
+        return []
+    if isinstance(tags, str):
+        return [t.strip() for t in tags.split(',') if t.strip()]
+    return [str(t).strip() for t in tags if str(t).strip()]
+
+
+def tool_memory_lifecycle_review(args: dict) -> dict:
+    """Review active/superseded/archive candidates without mutating memory."""
+    ns = (args or {}).get('namespace', 'mirage-infra')
+    query = (args or {}).get('query', '')
+    tags = _parse_tags_arg((args or {}).get('tags', []))
+    limit = max(1, min(int((args or {}).get('limit', 20) or 20), 100))
+    include_archived = bool((args or {}).get('include_archived', False))
+    where = ['namespace=?']
+    params = [ns]
+    if query:
+        where.append('(title LIKE ? OR content LIKE ? OR decision_text LIKE ?)')
+        like = f'%{query}%'
+        params.extend([like, like, like])
+    if not include_archived:
+        where.append("(status IS NULL OR status NOT IN ('archived'))")
+    sql = (
+        'SELECT id, namespace, type, title, tags, status, created_at, updated_at, '
+        'superseded_by, COALESCE(access_count,0) AS access_count '
+        'FROM entries WHERE ' + ' AND '.join(where) +
+        ' ORDER BY created_at DESC LIMIT ?'
+    )
+    params.append(limit * 4 if tags else limit)
+    con = sqlite3.connect(_memory_db_path())
+    con.row_factory = sqlite3.Row
+    try:
+        rows = con.execute(sql, params).fetchall()
+    finally:
+        con.close()
+    items = []
+    for r in rows:
+        try:
+            entry_tags = json.loads(r['tags'] or '[]')
+        except Exception:
+            entry_tags = []
+        if tags and not set(tags).issubset(set(entry_tags)):
+            continue
+        status = r['status'] or 'active'
+        suggested = []
+        if status == 'active' and entry_tags and any(t.endswith('smoke') or 'smoke' in t for t in entry_tags):
+            suggested.append('archive_smoke_probe')
+        if status == 'superseded':
+            suggested.append('already_superseded')
+        items.append({
+            'id': r['id'],
+            'namespace': r['namespace'],
+            'type': r['type'],
+            'title': r['title'] or '',
+            'status': status,
+            'tags': entry_tags,
+            'created_at': int(r['created_at'] or 0),
+            'updated_at': int(r['updated_at'] or 0),
+            'superseded_by': r['superseded_by'] or '',
+            'access_count': int(r['access_count'] or 0),
+            'suggested_actions': suggested,
+        })
+        if len(items) >= limit:
+            break
+    archive_candidates = [i for i in items if 'archive_smoke_probe' in i['suggested_actions']]
+    return {
+        'namespace': ns,
+        'query': query,
+        'tags': tags,
+        'operator_summary': (
+            f'{len(archive_candidates)} archive candidate(s), {len(items)} reviewed'
+            if archive_candidates else f'ok; {len(items)} lifecycle item(s) reviewed'
+        ),
+        'counts': {
+            'reviewed': len(items),
+            'archive_candidates': len(archive_candidates),
+        },
+        'items': items,
+    }
+
+
+def tool_memory_archive_by_query(args: dict) -> dict:
+    """Archive matching entries by query/tag. Defaults to dry_run=true."""
+    ns = (args or {}).get('namespace', 'mirage-infra')
+    query = (args or {}).get('query', '')
+    tags = _parse_tags_arg((args or {}).get('tags', []))
+    dry_run = bool((args or {}).get('dry_run', True))
+    limit = max(1, min(int((args or {}).get('limit', 20) or 20), 100))
+    if not query and not tags:
+        return {'error': 'query or tags required', 'dry_run': dry_run}
+    review = tool_memory_lifecycle_review({
+        'namespace': ns,
+        'query': query,
+        'tags': tags,
+        'limit': limit,
+        'include_archived': False,
+    })
+    ids = [
+        i['id'] for i in review.get('items', [])
+        if (i.get('status') or 'active') == 'active'
+    ][:limit]
+    result = {
+        'namespace': ns,
+        'query': query,
+        'tags': tags,
+        'dry_run': dry_run,
+        'matched': len(ids),
+        'archived': 0,
+        'ids': ids,
+        'operator_summary': (
+            f'would archive {len(ids)} matching entr(y/ies)'
+            if dry_run else f'archived {len(ids)} matching entr(y/ies)'
+        ),
+    }
+    if dry_run or not ids:
+        return result
+    con = sqlite3.connect(_memory_db_path())
+    try:
+        now = int(time.time())
+        con.executemany(
+            "UPDATE entries SET status='archived', updated_at=? WHERE id=? AND (status IS NULL OR status='active')",
+            [(now, entry_id) for entry_id in ids],
+        )
+        con.commit()
+        result['archived'] = len(ids)
+    finally:
+        con.close()
+    return result
 
 # ---------------------------------------------------------------------------
 # memory_freshness
@@ -1530,6 +1667,59 @@ def tool_memory_semantic_lite_status(args: dict) -> dict:
         return {'error': str(e), 'backend': 'semantic_lite_hashed_ngrams'}
 
 
+def tool_memory_semantic_backend_status(args: dict) -> dict:
+    """Report available semantic backends and install state."""
+    backends = []
+    try:
+        import numpy as _np
+        numpy_ok = True
+        numpy_version = getattr(_np, '__version__', '')
+    except Exception as e:
+        numpy_ok = False
+        numpy_version = ''
+    try:
+        import fastembed as _fastembed
+        fastembed_ok = True
+        fastembed_version = getattr(_fastembed, '__version__', '')
+    except Exception as e:
+        fastembed_ok = False
+        fastembed_version = ''
+        fastembed_error = str(e)
+    else:
+        fastembed_error = ''
+    try:
+        import hnswlib as _hnswlib
+        hnswlib_ok = True
+        hnswlib_version = getattr(_hnswlib, '__version__', '')
+    except Exception as e:
+        hnswlib_ok = False
+        hnswlib_version = ''
+        hnswlib_error = str(e)
+    else:
+        hnswlib_error = ''
+    current = 'semantic_lite_hashed_ngrams' if numpy_ok else 'fts_only'
+    target_ready = fastembed_ok and hnswlib_ok
+    return {
+        'operator_summary': (
+            'fastembed+hnsw ready' if target_ready
+            else 'using semantic_lite; fastembed/hnsw backend not installed'
+        ),
+        'current_backend': current,
+        'target_backend': 'fastembed_hnsw',
+        'target_ready': target_ready,
+        'backends': [
+            {'name': 'fts', 'available': True},
+            {'name': 'semantic_lite_hashed_ngrams', 'available': numpy_ok, 'numpy_version': numpy_version},
+            {'name': 'fastembed', 'available': fastembed_ok, 'version': fastembed_version, 'error': fastembed_error},
+            {'name': 'hnswlib', 'available': hnswlib_ok, 'version': hnswlib_version, 'error': hnswlib_error},
+        ],
+        'next_action': (
+            'implement fastembed_hnsw index/search'
+            if target_ready else 'install fastembed and hnswlib in the V2 runtime before backend swap'
+        ),
+    }
+
+
 def tool_memory_maintenance(args: dict) -> dict:
     """Return maintenance recommendation, optionally execute recommended actions."""
     ns = (args or {}).get('namespace', 'mirage-infra')
@@ -2303,6 +2493,28 @@ TOOLS = {
         }},
         'handler': tool_memory_active_decisions,
     },
+    'memory_lifecycle_review': {
+        'description': 'Review active/superseded/archive candidates by namespace/query/tags without mutating memory.',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'query': {'type': 'string'},
+            'tags': {'type': 'array', 'items': {'type': 'string'}},
+            'limit': {'type': 'integer'},
+            'include_archived': {'type': 'boolean'},
+        }},
+        'handler': tool_memory_lifecycle_review,
+    },
+    'memory_archive_by_query': {
+        'description': 'Archive matching active entries by query or tags. Defaults to dry_run=true.',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'query': {'type': 'string'},
+            'tags': {'type': 'array', 'items': {'type': 'string'}},
+            'limit': {'type': 'integer'},
+            'dry_run': {'type': 'boolean'},
+        }},
+        'handler': tool_memory_archive_by_query,
+    },
     'memory_freshness': {
         'description': 'Check bootstrap freshness for all namespaces.',
         'schema': {'type': 'object', 'properties': {
@@ -2457,6 +2669,11 @@ TOOLS = {
             'namespace': {'type': 'string'},
         }},
         'handler': tool_memory_semantic_lite_status,
+    },
+    'memory_semantic_backend_status': {
+        'description': 'Report semantic backend availability: FTS, semantic_lite, fastembed, hnswlib',
+        'schema': {'type': 'object', 'properties': {}},
+        'handler': tool_memory_semantic_backend_status,
     },
     'memory_maintenance': {
         'description': 'Return memory maintenance recommendation; execute only when allow_auto=true and dry_run=false',
