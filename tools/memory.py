@@ -893,6 +893,36 @@ def tool_memory_link_health(args: dict) -> dict:
     cross_ratio = round(cross / total_links, 4) if total_links else 0
 
     _EPISTEMIC_STATUS = 'candidate_graph' if semantic_ratio < 0.2 else 'partial_semantic'
+    action_plan = []
+    if semantic_ratio < 0.15:
+        action_plan.append({
+            'priority': 'P0',
+            'trigger': 'explicit_ratio < 15%',
+            'action': 'promote high-value related_auto links only after manual/source inspection',
+            'reason': 'most links are weak candidates; explicit supports/supersedes/contradicts links are still sparse',
+        })
+    if isolated_ratio > 0.60:
+        action_plan.append({
+            'priority': 'P1',
+            'trigger': 'isolated_ratio > 60%',
+            'action': 'defer broad isolated-entry backfill until fastembed_hnsw is active',
+            'reason': 'hashed ngram backfill would mostly create more weak related_auto links',
+        })
+    auto_ratio = round(candidate_count / total_links, 4) if total_links else 0
+    if auto_ratio > 0.80:
+        action_plan.append({
+            'priority': 'P1',
+            'trigger': 'related_auto_ratio > 80%',
+            'action': 'read graph as candidate_graph and prefer explicit links for decisions',
+            'reason': 'automatic related links dominate the graph',
+        })
+    if cross_ratio > 0.20 and semantic_ratio < 0.20:
+        action_plan.append({
+            'priority': 'P2',
+            'trigger': 'cross_namespace_ratio > 20% while explicit_ratio < 20%',
+            'action': 'treat cross-namespace links as discovery hints, not confirmed architecture coupling',
+            'reason': 'namespace-spanning candidates may be lexical coincidences until promoted',
+        })
 
     return {
         'operator_summary': (
@@ -911,8 +941,10 @@ def tool_memory_link_health(args: dict) -> dict:
         'explicit_links': explicit_count,
         'candidate_links': candidate_count,
         'manual_candidate_links': manual_candidate_count,
+        'related_auto_ratio': auto_ratio,
         'structural_links': structural_count,
         'semantic_ratio': semantic_ratio,
+        'action_plan': action_plan,
         'meaning_strength_scale': {
             'related_auto': 1,
             'related_manual': 2,
@@ -2010,8 +2042,31 @@ def tool_memory_trust_report(args: dict) -> dict:
     """Summarize known external-memory trust boundaries for operators and agents."""
     backend = tool_memory_semantic_backend_status({})
     compact = tool_memory_compact_status({})
+    link_health = tool_memory_link_health({})
     return {
         'operator_summary': 'external memory is usable; treat relation/search hints as candidates unless verified by source content',
+        'current_misread_risks': [
+            {
+                'risk': 'cross_namespace_hints may be misread as confirmed cross-domain relation',
+                'actual_status': 'candidate; lexical_match basis',
+                'safe_response': 'read source entries before using the hint as design evidence',
+            },
+            {
+                'risk': 'semantic_lite score may be misread as embedding similarity',
+                'actual_status': 'hashed token/ngram cosine, not true embedding',
+                'safe_response': 'treat score as retrieval confidence only',
+            },
+            {
+                'risk': 'related_auto links may be misread as explicit semantic links',
+                'actual_status': 'weak automatic candidate links',
+                'safe_response': 'prefer supports/supersedes/contradicts for decisions; promote only after inspection',
+            },
+            {
+                'risk': 'compact_status may be misread as reader-visible freshness',
+                'actual_status': 'job state from process registry or persistent snapshot',
+                'safe_response': 'verify applied state with memory_bootstrap freshness_level and since_last_compact',
+            },
+        ],
         'trust_boundaries': [
             {
                 'area': 'cross_namespace_hints',
@@ -2047,6 +2102,13 @@ def tool_memory_trust_report(args: dict) -> dict:
             'completion_verification_required': compact.get('completion_verification_required'),
             'verification_hint': compact.get('verification_hint'),
             'trust_boundary': compact.get('trust_boundary'),
+        },
+        'link_graph_trust': {
+            'epistemic_status': link_health.get('epistemic_status'),
+            'related_auto_ratio': link_health.get('related_auto_ratio'),
+            'semantic_ratio': link_health.get('semantic_ratio'),
+            'isolated_ratio': link_health.get('isolated_ratio'),
+            'action_plan': link_health.get('action_plan', []),
         },
         'required_operator_checks': [
             'For cross-namespace hints: read source entries before assuming a real relation.',
