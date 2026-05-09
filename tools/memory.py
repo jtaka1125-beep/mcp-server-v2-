@@ -1258,6 +1258,8 @@ def tool_memory_semantic_search(args: dict) -> dict:
         limit:      Number of results (default 5)
         types:      Optional type filter list
         use_llm:    bool (default True) - enable LLM re-ranking
+        use_semantic_lite: bool - when true, include semantic-lite candidates.
+                   If omitted, semantic-lite is used automatically when use_llm=false.
         fts_mult:   int (default 4) - FTS candidates = limit * fts_mult
     """
     import json as _json
@@ -1267,6 +1269,11 @@ def tool_memory_semantic_search(args: dict) -> dict:
     limit    = int((args or {}).get('limit', 5) or 5)
     types    = (args or {}).get('types', None)
     use_llm  = bool((args or {}).get('use_llm', True))
+    use_semantic_lite = (args or {}).get('use_semantic_lite', None)
+    if use_semantic_lite is None:
+        use_semantic_lite = not use_llm
+    else:
+        use_semantic_lite = bool(use_semantic_lite)
     fts_mult = int((args or {}).get('fts_mult', 4) or 4)
     
     if not query:
@@ -1282,13 +1289,53 @@ def tool_memory_semantic_search(args: dict) -> dict:
         raw = mem_store.search_all(query=query, types=types, limit=fts_limit)
     
     candidates = raw.get('hits', [])
+    seen_ids = set()
+    deduped_candidates = []
+    for c in candidates:
+        cid = c.get('id') if isinstance(c, dict) else None
+        if cid:
+            if cid in seen_ids:
+                continue
+            seen_ids.add(cid)
+        deduped_candidates.append(c)
+    candidates = deduped_candidates
+
+    lite_hits = []
+    lite_error = None
+    if use_semantic_lite:
+        try:
+            lite = mem_store.semantic_lite_search(
+                query=query, namespace=ns, types=types, limit=max(limit * 2, 10), min_score=0.05
+            )
+            lite_error = lite.get('error')
+            lite_hits = lite.get('hits') or []
+        except Exception as e:
+            lite_error = str(e)
+            lite_hits = []
+        merged = []
+        seen_ids = set()
+        for h in lite_hits + candidates:
+            cid = h.get('id') if isinstance(h, dict) else None
+            if cid:
+                if cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
+            merged.append(h)
+            if len(merged) >= max(limit * fts_mult, limit):
+                break
+        candidates = merged
     
     if not candidates or not use_llm or len(candidates) <= limit:
-        return {
+        out = {
             'hits': candidates[:limit],
-            'method': 'fts_only',
+            'method': 'semantic_lite_plus_fts' if use_semantic_lite and lite_hits else 'fts_only',
             'total_candidates': len(candidates),
         }
+        if use_semantic_lite:
+            out['semantic_lite_candidates'] = len(lite_hits)
+            if lite_error:
+                out['semantic_lite_error'] = lite_error
+        return out
     
     # Step 2: LLM re-ranking
     try:
@@ -1340,15 +1387,21 @@ JSON only, no explanation."""
                 'method': 'semantic_llm_rerank',
                 'total_candidates': len(candidates),
                 'model': 'qwen-3-235b',
+                'semantic_lite_candidates': len(lite_hits) if use_semantic_lite else 0,
             }
     except Exception as e:
         pass  # Degrade to FTS gracefully
     
-    return {
+    out = {
         'hits': candidates[:limit],
-        'method': 'fts_fallback',
+        'method': 'semantic_lite_plus_fts_fallback' if use_semantic_lite and lite_hits else 'fts_fallback',
         'total_candidates': len(candidates),
     }
+    if use_semantic_lite:
+        out['semantic_lite_candidates'] = len(lite_hits)
+        if lite_error:
+            out['semantic_lite_error'] = lite_error
+    return out
 
 
 def tool_memory_semantic_lite_rebuild(args: dict) -> dict:
@@ -2111,6 +2164,7 @@ TOOLS = {
             'limit':     {'type': 'integer'},
             'types':     {'type': 'array', 'items': {'type': 'string'}},
             'use_llm':   {'type': 'boolean'},
+            'use_semantic_lite': {'type': 'boolean'},
             'fts_mult':  {'type': 'integer', 'description': 'FTS candidates = limit * fts_mult (default 4)'},
         }},
         'handler': tool_memory_semantic_search,
