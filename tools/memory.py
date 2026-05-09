@@ -702,10 +702,51 @@ def tool_memory_l1(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Links ツール群 (Phase 3)
 # ---------------------------------------------------------------------------
+def _links_db_path() -> str:
+    import os
+    return r'C:\MirageWork\mcp-server\data\memory.db'
+
 def _links_connect():
-    import sqlite3, os
-    db = r'C:\MirageWork\mcp-server\data\memory.db'
-    return sqlite3.connect(db)
+    import sqlite3
+    return sqlite3.connect(_links_db_path())
+
+def _link_trust_class(relation_type: str, note: str = '') -> dict:
+    """Return operator-facing trust class for a memory link.
+
+    related links are split by provenance. Auto-created related links are useful
+    graph candidates, but weaker than explicit semantic relations.
+    """
+    rel = relation_type or ''
+    note_l = (note or '').lower()
+    if rel == 'related':
+        auto_markers = ('auto-', 'smoke', 'lint', 'semantic_lite', 'backfill')
+        is_auto = not note_l or any(marker in note_l for marker in auto_markers)
+        return {
+            'relation_strength': 'related_auto' if is_auto else 'related_manual',
+            'epistemic_status': 'candidate' if is_auto else 'manual_candidate',
+            'confidence_basis': 'auto_generated_link' if is_auto else 'manual_related_link',
+            'meaning_strength': 1 if is_auto else 2,
+        }
+    if rel in ('supports', 'supersedes', 'contradicts'):
+        return {
+            'relation_strength': rel,
+            'epistemic_status': 'explicit',
+            'confidence_basis': f'explicit_{rel}_link',
+            'meaning_strength': 4,
+        }
+    if rel == 'consolidated_into':
+        return {
+            'relation_strength': rel,
+            'epistemic_status': 'structural',
+            'confidence_basis': 'consolidation_link',
+            'meaning_strength': 3,
+        }
+    return {
+        'relation_strength': rel or 'unknown',
+        'epistemic_status': 'unknown',
+        'confidence_basis': 'unknown',
+        'meaning_strength': 0,
+    }
 
 def tool_memory_link_create(args: dict) -> dict:
     """Create a typed link between two memory entries."""
@@ -730,8 +771,9 @@ def tool_memory_link_create(args: dict) -> dict:
             (link_id, src, tgt, rel, score, int(time.time()), note)
         )
         con.commit()
+        trust = _link_trust_class(rel, note)
         return {'id': link_id, 'source_id': src, 'target_id': tgt,
-                'relation_type': rel, 'score': score}
+                'relation_type': rel, 'score': score, **trust}
     except Exception as e:
         return {'error': str(e)}
     finally:
@@ -771,9 +813,120 @@ def tool_memory_link_search(args: dict) -> dict:
                 results.append({'id':row[0],'source_id':row[1],'target_id':row[2],
                                  'relation_type':row[3],'score':row[4],'note':row[5],'direction':'in'})
         
-        return {'entry_id': entry_id, 'links': results, 'count': len(results)}
+        for lnk in results:
+            lnk.update(_link_trust_class(lnk.get('relation_type', ''), lnk.get('note') or ''))
+
+        return {'entry_id': entry_id, 'links': results, 'count': len(results),
+                'epistemic_summary': {
+                    'candidate': sum(1 for l in results if l['epistemic_status'] == 'candidate'),
+                    'manual_candidate': sum(1 for l in results if l['epistemic_status'] == 'manual_candidate'),
+                    'explicit':  sum(1 for l in results if l['epistemic_status'] == 'explicit'),
+                    'structural': sum(1 for l in results if l['epistemic_status'] == 'structural'),
+                },
+                'by_relation_strength': {
+                    key: sum(1 for l in results if l.get('relation_strength') == key)
+                    for key in ('related_auto', 'related_manual', 'supports', 'supersedes', 'contradicts', 'consolidated_into')
+                }}
     finally:
         con.close()
+
+
+def tool_memory_link_health(args: dict) -> dict:
+    """Return link network health: density, isolated ratio, semantic ratio, cross-namespace ratio."""
+    import sqlite3, os
+    db_path = _links_db_path()
+    if not os.path.exists(db_path):
+        return {'error': 'links db not found', 'total_links': 0}
+    con = sqlite3.connect(db_path)
+    try:
+        total_links = con.execute('SELECT COUNT(*) FROM links').fetchone()[0]
+        by_type = dict(con.execute(
+            'SELECT relation_type, COUNT(*) FROM links GROUP BY relation_type'
+        ).fetchall())
+        by_strength = {
+            'related_auto': 0,
+            'related_manual': 0,
+            'supports': by_type.get('supports', 0),
+            'supersedes': by_type.get('supersedes', 0),
+            'contradicts': by_type.get('contradicts', 0),
+            'consolidated_into': by_type.get('consolidated_into', 0),
+        }
+        for rel, note, count in con.execute(
+            'SELECT relation_type, COALESCE(note, ""), COUNT(*) FROM links GROUP BY relation_type, COALESCE(note, "")'
+        ).fetchall():
+            trust = _link_trust_class(rel, note)
+            key = trust.get('relation_strength', rel)
+            by_strength[key] = by_strength.get(key, 0) + count
+        # join entries for namespace cross-check
+        cross = con.execute("""
+            SELECT COUNT(*) FROM links l
+            JOIN entries e1 ON l.source_id = e1.id
+            JOIN entries e2 ON l.target_id = e2.id
+            WHERE e1.namespace != e2.namespace
+        """).fetchone()[0]
+    finally:
+        con.close()
+
+    # entry stats from main memory db
+    mem_db = _memory_db_path()
+    con2 = sqlite3.connect(mem_db)
+    try:
+        active = con2.execute("SELECT COUNT(*) FROM entries WHERE status='active'").fetchone()[0]
+        isolated = con2.execute("""
+            SELECT COUNT(*) FROM entries e
+            WHERE status='active'
+            AND e.id NOT IN (SELECT source_id FROM links l2)
+            AND e.id NOT IN (SELECT target_id FROM links l3)
+        """).fetchone()[0]
+    except Exception:
+        active = 0; isolated = 0
+    finally:
+        con2.close()
+
+    explicit_count = sum(by_type.get(t, 0) for t in ('supports', 'supersedes', 'contradicts'))
+    candidate_count = by_strength.get('related_auto', 0)
+    manual_candidate_count = by_strength.get('related_manual', 0)
+    structural_count = by_type.get('consolidated_into', 0)
+    density = round(total_links / active, 4) if active else 0
+    isolated_ratio = round(isolated / active, 4) if active else 0
+    semantic_ratio = round(explicit_count / total_links, 4) if total_links else 0
+    cross_ratio = round(cross / total_links, 4) if total_links else 0
+
+    _EPISTEMIC_STATUS = 'candidate_graph' if semantic_ratio < 0.2 else 'partial_semantic'
+
+    return {
+        'operator_summary': (
+            f'{"candidate_graph" if semantic_ratio < 0.2 else "partial_semantic"}; '
+            f'{total_links} links, density={density}, isolated={isolated_ratio:.1%}, '
+            f'explicit_ratio={semantic_ratio:.1%}, cross_ns={cross_ratio:.1%}'
+        ),
+        'epistemic_status': _EPISTEMIC_STATUS,
+        'total_links': total_links,
+        'active_entries': active,
+        'density': density,
+        'isolated_entries': isolated,
+        'isolated_ratio': isolated_ratio,
+        'by_relation_type': by_type,
+        'by_relation_strength': by_strength,
+        'explicit_links': explicit_count,
+        'candidate_links': candidate_count,
+        'manual_candidate_links': manual_candidate_count,
+        'structural_links': structural_count,
+        'semantic_ratio': semantic_ratio,
+        'meaning_strength_scale': {
+            'related_auto': 1,
+            'related_manual': 2,
+            'consolidated_into': 3,
+            'supports/supersedes/contradicts': 4,
+        },
+        'safe_reading': (
+            'related_auto is weak candidate evidence; related_manual is operator-marked but still not proof; '
+            'supports/supersedes/contradicts are explicit semantic links.'
+        ),
+        'cross_namespace_links': cross,
+        'cross_namespace_ratio': cross_ratio,
+        'upgrade_path': 'add verified explicit links (supports/supersedes/contradicts) and install fastembed backend',
+    }
 
 
 def tool_memory_link_traverse(args: dict) -> dict:
@@ -819,12 +972,14 @@ def tool_memory_link_traverse(args: dict) -> dict:
                     })
                 
                 # Traverse links
-                q = 'SELECT id, source_id, target_id, relation_type, score FROM links WHERE source_id = ? OR target_id = ?'
+                q = 'SELECT id, source_id, target_id, relation_type, score, note FROM links WHERE source_id = ? OR target_id = ?'
                 for lrow in con.execute(q, (eid, eid)).fetchall():
                     if rel_types and lrow[3] not in rel_types:
                         continue
+                    trust = _link_trust_class(lrow[3], lrow[5] or '')
                     all_edges.append({'id':lrow[0],'source':lrow[1],'target':lrow[2],
-                                      'type':lrow[3],'score':lrow[4]})
+                                      'type':lrow[3],'score':lrow[4],'note':lrow[5],
+                                      **trust})
                     other = lrow[2] if lrow[1] == eid else lrow[1]
                     if other not in visited:
                         next_frontier.add(other)
@@ -2736,6 +2891,11 @@ TOOLS = {
             'note':          {'type':'string'},
         }},
         'handler': tool_memory_link_create,
+    },
+    'memory_link_health': {
+        'description': 'Return link network health metrics: density, isolated ratio, explicit ratio, cross-namespace ratio',
+        'handler': tool_memory_link_health,
+        'schema': {'type': 'object', 'properties': {}, 'required': []},
     },
     'memory_link_search': {
         'description': 'Get links for an entry (in/out/both directions)',
