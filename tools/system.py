@@ -205,6 +205,79 @@ def tool_git_dirty_report(args: dict) -> dict:
         'repos': reports,
     }
 
+
+def _http_json(url: str, timeout: float = 3.0) -> dict:
+    import urllib.request
+    started = time.time()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            body = r.read().decode('utf-8', errors='replace')
+            return {
+                'ok': 200 <= int(r.status) < 300,
+                'status': int(r.status),
+                'latency_ms': round((time.time() - started) * 1000, 3),
+                'json': json.loads(body) if body else {},
+            }
+    except Exception as e:
+        return {
+            'ok': False,
+            'status': None,
+            'latency_ms': round((time.time() - started) * 1000, 3),
+            'error': str(e),
+        }
+
+
+def tool_mcp_health_report(args: dict) -> dict:
+    """Return one-shot MCP health summary for V1, V2, memory maintenance, and git dirtiness."""
+    include_git = bool((args or {}).get('include_git', True))
+    include_deep = bool((args or {}).get('include_deep', True))
+    v1 = _http_json('http://127.0.0.1:3000/health', timeout=3)
+    v2 = _http_json('http://127.0.0.1:3001/health', timeout=3)
+    v2_deep = _http_json('http://127.0.0.1:3001/health/deep', timeout=10) if include_deep else None
+    git_report = tool_git_dirty_report({}) if include_git else None
+
+    v1_json = v1.get('json') or {}
+    v2_json = v2.get('json') or {}
+    deep_json = (v2_deep or {}).get('json') or {}
+    issues = []
+    if not v1.get('ok'):
+        issues.append('v1_health_unreachable')
+    if not v2.get('ok'):
+        issues.append('v2_health_unreachable')
+    if include_deep and v2_deep and not v2_deep.get('ok'):
+        issues.append('v2_deep_health_unreachable')
+    if deep_json.get('memory_db_ok') is False:
+        issues.append('memory_db_not_ok')
+    if deep_json.get('semantic_lite_ok') is False:
+        issues.append('semantic_lite_not_ok')
+    if int(deep_json.get('maintenance_recommended_count') or 0) > 0:
+        issues.append('maintenance_recommended')
+    if git_report and int(git_report.get('source_dirty') or 0) > 0:
+        issues.append('source_dirty')
+
+    status = 'ok' if not issues else 'degraded'
+    return {
+        'status': status,
+        'issues': issues,
+        'summary': {
+            'v1_alive': bool(v1_json.get('v2_alive')) if v1.get('ok') else False,
+            'v1_payload_has_detail': 'v2_health_ms' in v1_json,
+            'v2_ok': bool(v2.get('ok') and v2_json.get('status') == 'ok'),
+            'v2_tools': v2_json.get('tools'),
+            'v2_pid': v2_json.get('pid'),
+            'v2_heartbeat_age_sec': v2_json.get('heartbeat_age_sec'),
+            'memory_db_ok': deep_json.get('memory_db_ok'),
+            'semantic_lite_ok': deep_json.get('semantic_lite_ok'),
+            'maintenance_recommended_count': deep_json.get('maintenance_recommended_count'),
+            'source_dirty': git_report.get('source_dirty') if git_report else None,
+            'generated_dirty': git_report.get('generated_dirty') if git_report else None,
+        },
+        'v1_health': v1,
+        'v2_health': v2,
+        'v2_deep_health': v2_deep,
+        'git_dirty_report': git_report,
+    }
+
 # ---------------------------------------------------------------------------
 # status (サーバー・デバイス全体状態)
 # ---------------------------------------------------------------------------
@@ -638,6 +711,14 @@ TOOLS = {
             'repos': {'type': 'array', 'items': {'type': 'string'}},
         }},
         'handler': tool_git_dirty_report,
+    },
+    'mcp_health_report': {
+        'description': 'One-shot MCP health summary: V1/V2 health, V2 deep diagnostics, maintenance recommendation, and git dirty classification.',
+        'schema': {'type': 'object', 'properties': {
+            'include_git': {'type': 'boolean'},
+            'include_deep': {'type': 'boolean'},
+        }},
+        'handler': tool_mcp_health_report,
     },
     'status': {
         'description': 'Get MirageSystem overall status.',
