@@ -831,6 +831,204 @@ def tool_memory_link_search(args: dict) -> dict:
         con.close()
 
 
+def tool_memory_link_promotion_candidates(args: dict) -> dict:
+    """Scan related_auto links and return candidates worth promoting to explicit relation types."""
+    import sqlite3, re, collections
+    limit = int((args or {}).get('limit', 30))
+    min_score = float((args or {}).get('min_score', 0.85))
+
+    db = _links_db_path()
+    mem = _memory_db_path()
+    con_l = sqlite3.connect(db)
+    con_m = sqlite3.connect(mem)
+    try:
+        # Get all related_auto links with score
+        rows = con_l.execute(
+            "SELECT id, source_id, target_id, score FROM links WHERE relation_type='related' ORDER BY COALESCE(score,0) DESC"
+        ).fetchall()
+
+        # Entry metadata cache
+        def get_entry(eid):
+            r = con_m.execute(
+                "SELECT namespace, type, title, content FROM entries WHERE id=? AND status='active'",
+                (eid,)
+            ).fetchone()
+            return r  # (namespace, type, title, content) or None
+
+        # Hub detection: count how many links point TO each target
+        target_counts = collections.Counter(r[2] for r in rows)
+
+        candidates = []
+        seen = set()
+
+        for link_id, src, tgt, score in rows:
+            if len(candidates) >= limit:
+                break
+            key = (src, tgt)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            score = score or 0.0
+            src_e = get_entry(src)
+            tgt_e = get_entry(tgt)
+            if not src_e or not tgt_e:
+                continue
+
+            reasons = []
+            promote_to = 'keep_auto'
+
+            # Condition 1: high score
+            if score >= min_score:
+                reasons.append(f'score={score:.3f}')
+
+            # Condition 2: hub (target has many incoming related links)
+            hub_cnt = target_counts[tgt]
+            if hub_cnt >= 3:
+                reasons.append(f'hub_count={hub_cnt}')
+
+            # Condition 3: both decision type
+            if src_e[1] == 'decision' and tgt_e[1] == 'decision':
+                reasons.append('both_decision')
+
+            # Condition 4: shared Phase/Loop/issue id in title
+            def extract_ids(text):
+                if not text:
+                    return set()
+                return set(re.findall(r'(?:Phase|Loop|chg-?\d+|Issue|P\d+)\s*[\s#]?\d+', text, re.IGNORECASE))
+
+            src_ids = extract_ids(str(src_e[2]) + ' ' + str(src_e[3] or ''))
+            tgt_ids = extract_ids(str(tgt_e[2]) + ' ' + str(tgt_e[3] or ''))
+            shared = src_ids & tgt_ids
+            if shared:
+                reasons.append(f'shared_ids={list(shared)[:3]}')
+
+            # Cross-namespace bonus
+            if src_e[0] != tgt_e[0]:
+                reasons.append(f'cross_ns={src_e[0]}->{tgt_e[0]}')
+
+            if not reasons:
+                continue  # skip if no promotion signal
+
+            # Determine promote_to
+            src_title = (src_e[2] or '').lower()
+            tgt_title = (tgt_e[2] or '').lower()
+            if any(w in src_title or w in tgt_title for w in ['supersede', 'replace', 'obsolete', '廃止', '置換']):
+                promote_to = 'supersedes'
+            elif any(w in src_title or w in tgt_title for w in ['support', 'confirm', 'verify', '確認', '実証']):
+                promote_to = 'supports'
+            elif score >= 0.9 or hub_cnt >= 5 or shared:
+                promote_to = 'related_manual'
+            else:
+                promote_to = 'keep_auto'
+
+            if promote_to == 'keep_auto':
+                continue
+
+            candidates.append({
+                'link_id': link_id,
+                'source_id': src,
+                'target_id': tgt,
+                'source_ns': src_e[0],
+                'target_ns': tgt_e[0],
+                'source_title': (src_e[2] or '')[:60],
+                'target_title': (tgt_e[2] or '')[:60],
+                'score': score,
+                'promote_to': promote_to,
+                'reasons': reasons,
+            })
+
+        return {
+            'operator_summary': f'{len(candidates)} promotion candidates found (of {len(rows)} related_auto links)',
+            'candidate_count': len(candidates),
+            'candidates': candidates[:limit],
+            'hint': 'Use memory_link_create to create explicit links, then delete or keep the related_auto.',
+        }
+    finally:
+        con_l.close()
+        con_m.close()
+
+
+def tool_memory_contradiction_candidates(args: dict) -> dict:
+    """Scan memory for potential design contradictions: banned patterns vs active mentions."""
+    import sqlite3, re
+    limit = int((args or {}).get('limit', 20))
+    mem = _memory_db_path()
+    con = sqlite3.connect(mem)
+    try:
+        # Banned pattern seeds (title/content keywords)
+        BAN_PATTERNS = [
+            # (ban_keyword, mention_keyword, description)
+            (r'H264|H\.264|AVC|h264', r'H264|H\.264|AVC|h264', 'H264/AVC 禁止 vs mention'),
+            (r'AOA|accessory', r'AOA|aoa_|AccessoryIoService|accessory_mode', 'AOA 禁止 vs mention'),
+            (r'D3D11VA|d3d11va', r'D3D11VA|d3d11va|D3D11', 'D3D11VA 禁止 vs mention'),
+            (r'禁止|forbidden|prohibited|deprecated|obsolete|廃止', r'use|実装|implement|enable|有効', '禁止 vs 実装'),
+            (r'pm uninstall', r'uninstall|pm uninstall', 'pm uninstall 禁止 vs mention'),
+        ]
+
+        all_entries = con.execute(
+            "SELECT id, namespace, type, title, content FROM entries WHERE status='active'"
+        ).fetchall()
+
+        # Split into ban entries and mention entries
+        candidates = []
+        seen_pairs = set()
+
+        for ban_kw, mention_kw, desc in BAN_PATTERNS:
+            ban_entries = [
+                e for e in all_entries
+                if re.search(ban_kw, str(e[3] or '') + ' ' + str(e[4] or ''), re.IGNORECASE)
+                and re.search(r'禁止|forbidden|prohibited|deprecated|obsolete|廃止|abort|removed|deleted', str(e[3] or '') + ' ' + str(e[4] or ''), re.IGNORECASE)
+            ]
+            mention_entries = [
+                e for e in all_entries
+                if re.search(mention_kw, str(e[3] or '') + ' ' + str(e[4] or ''), re.IGNORECASE)
+                and not re.search(r'禁止|forbidden|prohibited|deprecated|obsolete|廃止', str(e[3] or '') + ' ' + str(e[4] or ''), re.IGNORECASE)
+            ]
+
+            for ban_e in ban_entries[:3]:
+                for mention_e in mention_entries[:5]:
+                    if ban_e[0] == mention_e[0]:
+                        continue  # skip same entry
+                    pair = tuple(sorted([ban_e[0], mention_e[0]]))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    if len(candidates) >= limit:
+                        break
+                    candidates.append({
+                        'pattern': desc,
+                        'ban_entry': {
+                            'id': ban_e[0], 'namespace': ban_e[1], 'type': ban_e[2],
+                            'title': (ban_e[3] or '')[:60],
+                        },
+                        'mention_entry': {
+                            'id': mention_e[0], 'namespace': mention_e[1], 'type': mention_e[2],
+                            'title': (mention_e[3] or '')[:60],
+                        },
+                        'severity': 'high' if any(k in desc for k in ['H264', 'AOA', 'D3D11VA', 'pm uninstall']) else 'medium',
+                        'suggested_action': 'verify if mention_entry violates ban; if so, create contradicts link and flag for review',
+                    })
+
+        # Sort by severity
+        candidates.sort(key=lambda x: 0 if x['severity'] == 'high' else 1)
+
+        high = sum(1 for c in candidates if c['severity'] == 'high')
+        medium = sum(1 for c in candidates if c['severity'] == 'medium')
+
+        return {
+            'operator_summary': f'{len(candidates)} contradiction candidates ({high} high, {medium} medium)',
+            'candidate_count': len(candidates),
+            'high_count': high,
+            'medium_count': medium,
+            'candidates': candidates[:limit],
+            'hint': 'Review each pair. If genuine contradiction: memory_link_create relation_type=contradicts. If false positive: ignore.',
+            'note': 'This is a heuristic scan; manual review required before creating contradicts links.',
+        }
+    finally:
+        con.close()
+
+
 def tool_memory_link_health(args: dict) -> dict:
     """Return link network health: density, isolated ratio, semantic ratio, cross-namespace ratio."""
     import sqlite3, os
@@ -2953,6 +3151,21 @@ TOOLS = {
             'note':          {'type':'string'},
         }},
         'handler': tool_memory_link_create,
+    },
+    'memory_link_promotion_candidates': {
+        'description': 'Scan related_auto links and return candidates worth promoting to explicit relation types (supports/supersedes/related_manual)',
+        'handler': tool_memory_link_promotion_candidates,
+        'schema': {'type': 'object', 'properties': {
+            'limit': {'type': 'integer', 'description': 'Max candidates to return (default 30)'},
+            'min_score': {'type': 'number', 'description': 'Minimum score threshold (default 0.85)'},
+        }, 'required': []},
+    },
+    'memory_contradiction_candidates': {
+        'description': 'Scan memory for potential design contradictions: banned patterns vs active mentions (H264/AOA/D3D11VA/pm uninstall etc)',
+        'handler': tool_memory_contradiction_candidates,
+        'schema': {'type': 'object', 'properties': {
+            'limit': {'type': 'integer', 'description': 'Max candidates to return (default 20)'},
+        }, 'required': []},
     },
     'memory_link_health': {
         'description': 'Return link network health metrics: density, isolated ratio, explicit ratio, cross-namespace ratio',
