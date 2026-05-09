@@ -112,6 +112,35 @@ class TestMemorySearchAll:
         result = TOOLS['memory_search_all']['handler']({'query': 'HEVC', 'limit': 3})
         assert 'hits' in result
 
+
+class TestMemoryMaintenanceMonitor:
+    """memory_maintenance_monitor tool"""
+
+    def test_registered(self):
+        from tools.memory import TOOLS
+        assert 'memory_maintenance_monitor' in TOOLS
+
+    def test_monitor_dry_run(self):
+        from tools.memory import TOOLS
+        result = TOOLS['memory_maintenance_monitor']['handler']({
+            'namespaces': ['mirage-infra'],
+            'dry_run': True,
+            'allow_auto': False,
+        })
+        assert result['dry_run'] is True
+        assert result['allow_auto'] is False
+        assert result['namespaces'] == ['mirage-infra']
+        assert 'results' in result
+        assert len(result['results']) == 1
+
+    def test_monitor_rejects_invalid_namespaces(self):
+        from tools.memory import TOOLS
+        result = TOOLS['memory_maintenance_monitor']['handler']({
+            'namespaces': ['invalid-namespace'],
+        })
+        assert 'error' in result
+        assert 'valid_namespaces' in result
+
     def test_returns_namespace_field(self):
         from tools.memory import TOOLS
         result = TOOLS['memory_search_all']['handler']({'query': 'encoder', 'limit': 5})

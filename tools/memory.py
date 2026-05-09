@@ -1608,6 +1608,72 @@ def tool_memory_maintenance(args: dict) -> dict:
         return {'error': str(e), 'namespace': ns}
 
 
+def tool_memory_maintenance_monitor(args: dict) -> dict:
+    """Check all memory namespaces and optionally execute safe maintenance."""
+    default_namespaces = [
+        'mirage-infra',
+        'mirage-vulkan',
+        'mirage-android',
+        'mirage-design',
+        'mirage-general',
+    ]
+    namespaces = (args or {}).get('namespaces') or default_namespaces
+    if isinstance(namespaces, str):
+        namespaces = [n.strip() for n in namespaces.split(',') if n.strip()]
+    namespaces = [n for n in namespaces if n in default_namespaces]
+    if not namespaces:
+        return {'error': 'no valid namespaces', 'valid_namespaces': default_namespaces}
+
+    allow_auto = bool((args or {}).get('allow_auto', False))
+    dry_run = bool((args or {}).get('dry_run', True))
+    max_runtime_sec = int((args or {}).get('max_runtime_sec', 120) or 120)
+    stop_after_first_execute = bool((args or {}).get('stop_after_first_execute', True))
+    started = time.time()
+    results = []
+    executed_count = 0
+    for ns in namespaces:
+        remaining = max_runtime_sec - int(time.time() - started)
+        if remaining <= 0:
+            results.append({
+                'namespace': ns,
+                'skipped_reason': 'monitor max_runtime_sec exhausted',
+            })
+            continue
+        ns_allow_auto = allow_auto and (not stop_after_first_execute or executed_count == 0)
+        result = tool_memory_maintenance({
+            'namespace': ns,
+            'allow_auto': ns_allow_auto,
+            'dry_run': dry_run,
+            'max_runtime_sec': remaining,
+        })
+        if result.get('executed'):
+            executed_count += len(result.get('executed') or [])
+        elif allow_auto and stop_after_first_execute and executed_count > 0:
+            result['skipped_reason'] = result.get('skipped_reason') or 'stop_after_first_execute=true'
+        results.append(result)
+
+    recommended = []
+    for r in results:
+        for plan in (r.get('planned') or []):
+            recommended.append({
+                'namespace': r.get('namespace'),
+                'action': plan.get('action'),
+                'reason': plan.get('reason', ''),
+                'args': plan.get('args', {}),
+            })
+    return {
+        'namespaces': namespaces,
+        'allow_auto': allow_auto,
+        'dry_run': dry_run,
+        'stop_after_first_execute': stop_after_first_execute,
+        'duration_sec': round(time.time() - started, 3),
+        'recommended_count': len(recommended),
+        'executed_count': executed_count,
+        'recommended': recommended,
+        'results': results,
+    }
+
+
 def tool_memory_semantic_lite_search(args: dict) -> dict:
     """Search dependency-light hashed n-gram vector index."""
     query = (args or {}).get('query', '')
@@ -2388,6 +2454,17 @@ TOOLS = {
             'max_runtime_sec': {'type': 'integer'},
         }},
         'handler': tool_memory_maintenance,
+    },
+    'memory_maintenance_monitor': {
+        'description': 'Check memory maintenance recommendations across namespaces; execute only when allow_auto=true and dry_run=false',
+        'schema': {'type': 'object', 'properties': {
+            'namespaces': {'type': 'array', 'items': {'type': 'string'}},
+            'allow_auto': {'type': 'boolean'},
+            'dry_run': {'type': 'boolean'},
+            'max_runtime_sec': {'type': 'integer'},
+            'stop_after_first_execute': {'type': 'boolean'},
+        }},
+        'handler': tool_memory_maintenance_monitor,
     },
     'memory_semantic_lite_search': {
         'description': 'Search semantic-lite hashed n-gram vector index (numpy cosine over token/ngram vectors)',
