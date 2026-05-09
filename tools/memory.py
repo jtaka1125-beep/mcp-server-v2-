@@ -1029,6 +1029,254 @@ def tool_memory_contradiction_candidates(args: dict) -> dict:
         con.close()
 
 
+
+
+def tool_memory_fastembed_rebuild(args: dict) -> dict:
+    """Build fastembed index using true embedding model (BAAI/bge-small-en-v1.5, 384dim).
+    Requires C:\MirageWork\venv\memory-win\Scripts\python.exe with fastembed installed."""
+    import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+    from memory_store import fastembed_rebuild
+    namespaces = (args or {}).get('namespaces', None)
+    return fastembed_rebuild(namespaces=namespaces)
+
+
+def tool_memory_fastembed_search(args: dict) -> dict:
+    """Search memory using fastembed true embeddings (cosine similarity).
+    Returns epistemic_status='semantic_match' for genuine embedding similarity."""
+    import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+    from memory_store import fastembed_search
+    query = (args or {}).get('query', '')
+    if not query:
+        return {'hits': [], 'error': 'query required'}
+    namespace = (args or {}).get('namespace', None)
+    limit = int((args or {}).get('limit', 5))
+    min_score = float((args or {}).get('min_score', 0.3))
+    return fastembed_search(query, namespace=namespace, limit=limit, min_score=min_score)
+
+
+def tool_memory_fastembed_status(args: dict) -> dict:
+    """Check fastembed backend availability and index status."""
+    import os, sys as _sys
+    _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+    from memory_store import _FASTEMBED_VENV_PYTHON, _FASTEMBED_INDEX_PATH, _fastembed_available, _FASTEMBED_MODEL
+    idx_path = _FASTEMBED_INDEX_PATH if os.path.exists(_FASTEMBED_INDEX_PATH) else _FASTEMBED_INDEX_PATH + '.npz'
+    idx_exists = os.path.exists(idx_path)
+    available = _fastembed_available()
+    count = 0
+    dims = 0
+    if idx_exists:
+        try:
+            import numpy as np
+            data = np.load(idx_path, allow_pickle=True)
+            count = len(data['ids'])
+            dims = data['embeddings'].shape[1] if len(data['embeddings'].shape) > 1 else 0
+        except Exception:
+            pass
+    return {
+        'available': available,
+        'venv_python': _FASTEMBED_VENV_PYTHON,
+        'model': _FASTEMBED_MODEL,
+        'index_exists': idx_exists,
+        'index_path': idx_path,
+        'count': count,
+        'dims': dims,
+        'epistemic_status': 'true_embedding' if available else 'unavailable',
+        'operator_summary': (
+            f'fastembed ready; index has {count} entries ({dims}d)' if available and idx_exists
+            else 'fastembed available but index not built; run memory_fastembed_rebuild' if available
+            else 'fastembed venv not available; check venv/memory-win'
+        ),
+    }
+
+
+def tool_memory_link_promotion_review(args: dict) -> dict:
+    """Approve or reject link promotion candidates.
+    
+    Workflow:
+      1. Call memory_link_promotion_candidates to get candidates.
+      2. For each candidate, decide:
+         - approve: create explicit link (promote_to relation type)
+         - reject:  keep as related_auto (no action)
+         - supersedes: create supersedes link instead
+         - supports:   create supports link instead
+      3. Pass decisions list here.
+    
+    Args:
+      decisions: list of {link_id, action: approve|reject|supersedes|supports|contradicts, note?}
+      dry_run: bool (default true) - preview without writing
+    """
+    import time, uuid
+    decisions = (args or {}).get('decisions', [])
+    dry_run = (args or {}).get('dry_run', True)
+
+    if not decisions:
+        return {'error': 'decisions list required', 'hint': 'Get candidates via memory_link_promotion_candidates first'}
+
+    con_l = _links_connect()
+    results = []
+    try:
+        for dec in decisions:
+            link_id = dec.get('link_id', '')
+            action  = dec.get('action', 'reject')  # approve|reject|supersedes|supports|contradicts
+            note    = dec.get('note', '')
+            override_promote_to = dec.get('promote_to', None)  # override if different from candidate suggestion
+
+            # Fetch existing link
+            row = con_l.execute(
+                'SELECT id, source_id, target_id, relation_type, score FROM links WHERE id=?',
+                (link_id,)
+            ).fetchone()
+            if not row:
+                results.append({'link_id': link_id, 'status': 'not_found'})
+                continue
+
+            _, src, tgt, rel_type, score = row
+
+            if action == 'reject':
+                results.append({'link_id': link_id, 'status': 'rejected', 'dry_run': dry_run})
+                continue
+
+            # Determine target relation type
+            if action == 'approve':
+                new_rel = override_promote_to or 'related_manual'
+            elif action in ('supersedes', 'supports', 'contradicts'):
+                new_rel = action
+            else:
+                results.append({'link_id': link_id, 'status': 'unknown_action', 'action': action})
+                continue
+
+            if dry_run:
+                results.append({
+                    'link_id': link_id, 'status': 'would_promote',
+                    'from': rel_type, 'to': new_rel,
+                    'source_id': src, 'target_id': tgt,
+                    'dry_run': True,
+                })
+                continue
+
+            # Create new explicit link
+            new_id = str(uuid.uuid4())
+            now = int(time.time())
+            con_l.execute(
+                'INSERT INTO links (id, source_id, target_id, relation_type, score, note, created_at) VALUES (?,?,?,?,?,?,?)',
+                (new_id, src, tgt, new_rel, score or 0.8, note or f'promoted from {rel_type}', now)
+            )
+            # Mark old related_auto as superseded (update note)
+            con_l.execute(
+                "UPDATE links SET note=? WHERE id=?",
+                (f'promoted_to:{new_id}', link_id)
+            )
+            con_l.commit()
+            results.append({
+                'link_id': link_id, 'status': 'promoted',
+                'new_link_id': new_id, 'from': rel_type, 'to': new_rel,
+                'source_id': src, 'target_id': tgt, 'dry_run': False,
+            })
+
+        approved = sum(1 for r in results if r.get('status') in ('promoted', 'would_promote'))
+        rejected = sum(1 for r in results if r.get('status') == 'rejected')
+        return {
+            'operator_summary': f'{"[DRY RUN] " if dry_run else ""}reviewed {len(decisions)} candidates: {approved} promote, {rejected} reject',
+            'dry_run': dry_run,
+            'approved_count': approved,
+            'rejected_count': rejected,
+            'results': results,
+            'hint': 'Set dry_run=false to actually create links' if dry_run else 'Links created. Run memory_link_health to verify.',
+        }
+    finally:
+        con_l.close()
+
+
+def tool_memory_contradiction_review(args: dict) -> dict:
+    """Classify contradiction candidates as false_positive, supports, or contradicts.
+    
+    Workflow:
+      1. Call memory_contradiction_candidates to get candidates.
+      2. For each pair, decide:
+         - false_positive: not a real contradiction (e.g. historical record)
+         - contradicts: genuine design contradiction -> create contradicts link
+         - supports: the mention actually supports the ban (e.g. investigation that led to ban)
+      3. Pass decisions list here.
+    
+    Args:
+      decisions: list of {ban_id, mention_id, classification: false_positive|contradicts|supports, note?}
+      dry_run: bool (default true)
+    """
+    import time, uuid
+    decisions = (args or {}).get('decisions', [])
+    dry_run = (args or {}).get('dry_run', True)
+
+    if not decisions:
+        return {
+            'error': 'decisions list required',
+            'hint': 'Get candidates via memory_contradiction_candidates first. Each decision needs ban_id, mention_id, classification.'
+        }
+
+    con_l = _links_connect()
+    results = []
+    try:
+        for dec in decisions:
+            ban_id      = dec.get('ban_id', '')
+            mention_id  = dec.get('mention_id', '')
+            classif     = dec.get('classification', 'false_positive')
+            note        = dec.get('note', '')
+
+            if not ban_id or not mention_id:
+                results.append({'status': 'missing_ids', 'decision': dec})
+                continue
+
+            if classif == 'false_positive':
+                results.append({
+                    'ban_id': ban_id, 'mention_id': mention_id,
+                    'status': 'false_positive_noted', 'dry_run': dry_run,
+                    'note': 'No link created. Consider adding false_positive note to ban entry if needed.',
+                })
+                continue
+
+            rel_type = classif  # 'contradicts' or 'supports'
+            if rel_type not in ('contradicts', 'supports'):
+                results.append({'status': 'unknown_classification', 'classification': classif})
+                continue
+
+            if dry_run:
+                results.append({
+                    'ban_id': ban_id, 'mention_id': mention_id,
+                    'status': f'would_create_{rel_type}', 'dry_run': True,
+                })
+                continue
+
+            new_id = str(uuid.uuid4())
+            now = int(time.time())
+            con_l.execute(
+                'INSERT INTO links (id, source_id, target_id, relation_type, score, note, created_at) VALUES (?,?,?,?,?,?,?)',
+                (new_id, ban_id, mention_id, rel_type, 0.9, note or f'from contradiction_review', now)
+            )
+            con_l.commit()
+            results.append({
+                'ban_id': ban_id, 'mention_id': mention_id,
+                'status': f'{rel_type}_link_created',
+                'new_link_id': new_id, 'dry_run': False,
+            })
+
+        contradicts_created = sum(1 for r in results if 'contradicts_link_created' in r.get('status', ''))
+        supports_created    = sum(1 for r in results if 'supports_link_created' in r.get('status', ''))
+        fp_noted            = sum(1 for r in results if r.get('status') == 'false_positive_noted')
+        return {
+            'operator_summary': (
+                f'{"[DRY RUN] " if dry_run else ""}reviewed {len(decisions)} pairs: '
+                f'{contradicts_created} contradicts, {supports_created} supports, {fp_noted} false_positive'
+            ),
+            'dry_run': dry_run,
+            'contradicts_created': contradicts_created,
+            'supports_created': supports_created,
+            'false_positive_count': fp_noted,
+            'results': results,
+            'hint': 'Set dry_run=false to create links' if dry_run else 'Links created. Run memory_link_health to check explicit_ratio.',
+        }
+    finally:
+        con_l.close()
+
+
 def tool_memory_link_health(args: dict) -> dict:
     """Return link network health: density, isolated ratio, semantic ratio, cross-namespace ratio."""
     import sqlite3, os
@@ -3151,6 +3399,44 @@ TOOLS = {
             'note':          {'type':'string'},
         }},
         'handler': tool_memory_link_create,
+    },
+    'memory_fastembed_rebuild': {
+        'description': 'Build fastembed true embedding index (BAAI/bge-small-en-v1.5, 384dim). Requires memory-win venv.',
+        'handler': tool_memory_fastembed_rebuild,
+        'schema': {'type': 'object', 'properties': {
+            'namespaces': {'type': 'array', 'description': 'Limit to specific namespaces (default: all)'},
+        }, 'required': []},
+    },
+    'memory_fastembed_search': {
+        'description': 'Search memory using true fastembed embeddings. Returns epistemic_status=semantic_match.',
+        'handler': tool_memory_fastembed_search,
+        'schema': {'type': 'object', 'properties': {
+            'query': {'type': 'string'},
+            'namespace': {'type': 'string'},
+            'limit': {'type': 'integer'},
+            'min_score': {'type': 'number', 'description': 'Minimum cosine similarity (default 0.3)'},
+        }, 'required': ['query']},
+    },
+    'memory_fastembed_status': {
+        'description': 'Check fastembed backend availability and index status.',
+        'handler': tool_memory_fastembed_status,
+        'schema': {'type': 'object', 'properties': {}, 'required': []},
+    },
+    'memory_link_promotion_review': {
+        'description': 'Approve or reject link promotion candidates. approve->related_manual/supports/supersedes, reject->keep auto. dry_run=true by default.',
+        'handler': tool_memory_link_promotion_review,
+        'schema': {'type': 'object', 'properties': {
+            'decisions': {'type': 'array', 'description': 'List of {link_id, action: approve|reject|supersedes|supports|contradicts, promote_to?, note?}'},
+            'dry_run': {'type': 'boolean', 'description': 'Preview without writing (default true)'},
+        }, 'required': ['decisions']},
+    },
+    'memory_contradiction_review': {
+        'description': 'Classify contradiction candidates as false_positive, supports, or contradicts. Creates explicit links. dry_run=true by default.',
+        'handler': tool_memory_contradiction_review,
+        'schema': {'type': 'object', 'properties': {
+            'decisions': {'type': 'array', 'description': 'List of {ban_id, mention_id, classification: false_positive|contradicts|supports, note?}'},
+            'dry_run': {'type': 'boolean', 'description': 'Preview without writing (default true)'},
+        }, 'required': ['decisions']},
     },
     'memory_link_promotion_candidates': {
         'description': 'Scan related_auto links and return candidates worth promoting to explicit relation types (supports/supersedes/related_manual)',
