@@ -101,13 +101,28 @@ def _file_age_sec(path: str):
         return None
 
 
-def _health_payload() -> dict:
-    """Return one-shot operational health without mutating memory state."""
+def _health_payload(deep: bool = False) -> dict:
+    """Return operational health without mutating memory state."""
     warnings = []
+    payload = {
+        'name': 'mirage-mcp-v2',
+        'version': '1.0.0',
+        'port': PORT_NEW,
+        'tools': len(TOOLS),
+        'status': 'ok',
+        'pid': os.getpid(),
+        'uptime_sec': round(time.time() - SERVER_STARTED_AT, 3),
+        'heartbeat_age_sec': _file_age_sec(HEARTBEAT_FILE),
+        'pid_file': PID_FILE,
+        'heartbeat_file': HEARTBEAT_FILE,
+        'warnings': warnings,
+    }
+    if not deep:
+        return payload
+
     memory_db_ok = False
     semantic_lite_ok = False
     maintenance_recommended_count = None
-
     try:
         import sqlite3
         from memory import store as mem_store
@@ -138,22 +153,14 @@ def _health_payload() -> dict:
     except Exception as e:
         warnings.append(f'maintenance_monitor: {e}')
 
-    return {
-        'name': 'mirage-mcp-v2',
-        'version': '1.0.0',
-        'port': PORT_NEW,
-        'tools': len(TOOLS),
+    payload.update({
         'status': 'ok' if memory_db_ok else 'degraded',
-        'pid': os.getpid(),
-        'uptime_sec': round(time.time() - SERVER_STARTED_AT, 3),
-        'heartbeat_age_sec': _file_age_sec(HEARTBEAT_FILE),
-        'pid_file': PID_FILE,
-        'heartbeat_file': HEARTBEAT_FILE,
         'memory_db_ok': memory_db_ok,
         'semantic_lite_ok': semantic_lite_ok,
         'maintenance_recommended_count': maintenance_recommended_count,
         'warnings': warnings,
-    }
+    })
+    return payload
 
 # ---------------------------------------------------------------------------
 # MCP ハンドラ
@@ -224,6 +231,8 @@ class MCPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ('/', '/health'):
             self._send_json(200, _health_payload())
+        elif self.path == '/health/deep':
+            self._send_json(200, _health_payload(deep=True))
         elif self.path == '/mcp':
             # SSE初期化用
             self._send_json(200, {'jsonrpc': '2.0', 'result': {}})
