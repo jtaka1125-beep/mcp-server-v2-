@@ -48,6 +48,13 @@ def _load_env():
                 os.environ[key] = val
 _load_env()
 
+# [2026-05-11 da06ca55] Tried eager-import google.generativeai here to fix the
+# handler-thread import hang. It made V2 STARTUP itself hang (no "Registered
+# tools" log line within 5+ min). So the import is genuinely slow on this V2
+# main-thread context too — not a thread-locality issue. Action A confirmed
+# negative; next try Action B (subprocess-isolated Gemini wrapper) per da06ca55.
+# Reverted; do NOT re-add this without subprocess isolation.
+
 from config import PORT_NEW
 from fallback import call_fallback
 import tools.memory as memory_tools
