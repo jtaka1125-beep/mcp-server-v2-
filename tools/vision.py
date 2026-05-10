@@ -164,9 +164,47 @@ CLASSIFY_SYSTEM_PROMPT = (
     'Classes: ad (any advertisement/install prompt), login, feed, settings, home, dialog, video.'
 )
 
+# [P0 #2] Added deceptive-ad detection hint. Web-based interstitials with white
+# background, text-heavy layout, and no explicit "AD" label are easy to confuse
+# with feed/login. Anchor on structural ad markers (top-right close X + single
+# dominant CTA) which are present even in minimal designs.
 CLASSIFY_IMAGE_USER_PROMPT = (
-    '"ad" includes app install ads and interstitial ads. Classify this screenshot.'
+    '"ad" includes app install ads and interstitial ads. '
+    'IMPORTANT: even when the page looks minimal (white background, plain text, no "AD" label), '
+    'classify as "ad" if BOTH conditions hold: (1) a small close button (X / × / Skip / 閉じる) '
+    'in the top-right or top corner area, AND (2) a single large CTA button (Open / Install / 開く) '
+    'dominating the bottom area. These are interstitial ad signatures. '
+    'Classify this screenshot.'
 )
+
+
+# [P0 #1] Bottom-nav crop helper. The Android home indicator + 5-icon nav bar
+# at the screen bottom is a strong "home screen" signal that biases E4B toward
+# misclassifying full-screen interstitials. Cropping ~8% bottom removes the
+# distractor without losing ad content (CTAs typically sit above the nav bar).
+def _preprocess_image_for_classify(path: str, crop_bottom_pct: float = 0.08) -> str:
+    """Return path to a preprocessed image; falls back to original on any failure.
+
+    crop_bottom_pct: fraction of image height to crop from bottom (default 8%).
+                     Set to 0 to disable.
+    """
+    if not crop_bottom_pct or crop_bottom_pct <= 0:
+        return path
+    try:
+        from PIL import Image
+        import tempfile as _tempfile
+        with Image.open(path) as im:
+            w, h = im.size
+            crop_h = int(h * crop_bottom_pct)
+            if crop_h <= 0 or crop_h >= h:
+                return path
+            cropped = im.crop((0, 0, w, h - crop_h))
+            tmp = _tempfile.NamedTemporaryFile(suffix='_cls.png', delete=False)
+            tmp.close()
+            cropped.save(tmp.name, format='PNG')
+            return tmp.name
+    except Exception:
+        return path
 
 
 def _classify_call(messages: list, timeout: int) -> dict:
@@ -321,8 +359,10 @@ def tool_classify_screen(args: dict) -> dict:
         ]
     else:
         source = 'image_only'
+        crop_bottom_pct = float(args.get('crop_bottom_pct', 0.08) or 0)
+        effective_path = _preprocess_image_for_classify(image_path, crop_bottom_pct)
         try:
-            with open(image_path, 'rb') as f:
+            with open(effective_path, 'rb') as f:
                 b64 = base64.b64encode(f.read()).decode()
         except Exception as e:
             return {'error': f'image read failed: {e}', 'details': {'image_path': image_path}}
@@ -416,6 +456,7 @@ TOOLS = {
         'schema': {'type': 'object', 'properties': {
             'ax_dump':    {'type': 'string', 'description': 'AX summary string. Caller summarizes the AX tree to a short hint line; raw XML will exceed ctx and likely misclassify. Example: "AX tree: FrameLayout root > FrameLayout ia_clickable_close_button clickable=true > TextView ad_label text=\\"AD\\" > Activity=TTFullScreenVideoActivity. Classify."'},
             'image_path': {'type': 'string', 'description': 'Absolute path to PNG screenshot'},
+            'crop_bottom_pct': {'type': 'number', 'description': 'image_only: fraction of bottom to crop (default 0.08 = 8%, set to 0 to disable). Removes nav bar distractor.'},
             'timeout':    {'type': 'integer', 'description': 'HTTP timeout seconds (default 30)'},
         }},
         'handler': tool_classify_screen,
