@@ -151,8 +151,20 @@ def _call_gemini(prompt: str, max_tokens: int, timeout: int,
     parts = []
     if image_b64:
         import base64
-        parts.append({'mime_type': 'image/jpeg',
-                      'data': base64.b64decode(image_b64)})
+        raw = base64.b64decode(image_b64)
+        # Detect MIME from magic bytes; mismatched mime causes Gemini to silently
+        # drop the image (observed 2026-05-11: declared image/jpeg + PNG payload
+        # -> "IMAGE_NOT_VISIBLE" responses). PNG starts with '\x89PNG', JPEG with
+        # '\xff\xd8\xff', WEBP is 'RIFF....WEBP'.
+        if raw[:4] == b'\x89PNG':
+            mime = 'image/png'
+        elif raw[:3] == b'\xff\xd8\xff':
+            mime = 'image/jpeg'
+        elif raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+            mime = 'image/webp'
+        else:
+            mime = 'image/jpeg'  # fallback
+        parts.append({'mime_type': mime, 'data': raw})
     parts.append(prompt)
     resp = model.generate_content(parts,
                                   request_options={'timeout': timeout})
