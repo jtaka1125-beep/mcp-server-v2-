@@ -133,8 +133,14 @@ def _confirm(op_key: str, args: dict) -> dict | None:
 
 
 def _j(value: Any) -> str:
-    """Serialize a Python value as a JSON literal usable in a code body."""
-    return json.dumps(value)
+    """Serialize a Python value as a Python literal usable in a code body.
+
+    [FIX 2026-04-24] Was json.dumps(), which produced JSON tokens (null/true/false)
+    invalid in Python -- caused NameError in windows_snapshot when display=None.
+    Switched to repr() so None/True/False serialize as valid Python literals.
+    dict/list/str/int/float all remain evalable as Python.
+    """
+    return repr(value)
 
 
 # ===========================================================================
@@ -171,11 +177,15 @@ def tool_windows_snapshot(args: dict) -> dict:
         f"use_annotation = {bool(args.get('use_annotation', False))}\n"
         f"use_dom = {bool(args.get('use_dom', False))}\n"
         f"display = {_j(args.get('display'))}\n"
+        f"width_reference_line = {_j(args.get('width_reference_line'))}\n"
+        f"height_reference_line = {_j(args.get('height_reference_line'))}\n"
         "d = Desktop()\n"
         "result = capture_desktop_state(\n"
         "    d, use_vision=False, use_dom=use_dom,\n"
         "    use_annotation=use_annotation, use_ui_tree=use_ui_tree,\n"
         "    display=display, tool_name='windows_snapshot',\n"
+        "    width_reference_line=width_reference_line,\n"
+        "    height_reference_line=height_reference_line,\n"
         ")\n"
         "payload = build_snapshot_response(result, include_ui_details=True)\n"
         "out = []\n"
@@ -188,7 +198,9 @@ def tool_windows_snapshot(args: dict) -> dict:
         "        out.append({'type': 'raw', 'repr': repr(item)})\n"
         "print(json.dumps({'ok': True, 'snapshot': out}))\n"
     )
-    return _run_in_venv(body, timeout=45)
+    # [FIX 2026-04-24] 45s->120s: UIA enumeration can hang when apps are
+    # launching / not responding to WM messages (see windows-mcp service.py L154).
+    return _run_in_venv(body, timeout=120)
 
 
 def tool_windows_click(args: dict) -> dict:
