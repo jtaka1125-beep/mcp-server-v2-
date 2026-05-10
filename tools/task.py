@@ -16,6 +16,7 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import MIRAGE_DIR, CLAUDE_EXE
 from parallel import CLI_GATE, gate_stats
+from boundary import verify_claude_output  # [2026-04-26 C3] layer 1 verifier
 
 log = logging.getLogger(__name__)
 
@@ -87,14 +88,27 @@ def _run_claude_async(task_id: str, prompt: str, cwd: str, model: str = None):
             output += f'\n[stderr]: {result.stderr[:500]}'
         output += f'\n[exit_code]: {result.returncode}'
 
-        # Attach server log tail on non-zero exit
-        if result.returncode != 0:
+        # [2026-04-26 C3] layer 1 boundary verification (entry 5ecbed0b)
+        ok_l1, anomaly_reason = verify_claude_output(
+            result.returncode, result.stdout or '', result.stderr or ''
+        )
+        if not ok_l1:
+            output += f'\n[layer1_anomaly]: {anomaly_reason}'
+
+        # Attach server log tail on non-zero exit OR layer 1 anomaly
+        if result.returncode != 0 or not ok_l1:
             log_tail = _get_server_log_tail(20)
             if log_tail:
                 output += f'\n\n--- Server Log (last 20 lines) ---\n{log_tail}'
+
+        # Mark anomaly status separately so monitoring can distinguish
+        # "exit=0 but invalid" from a clean completion.
+        final_status = 'completed' if (result.returncode == 0 and ok_l1) else 'anomaly'
         with _tasks_lock:
-            _tasks[task_id]['status'] = 'completed'
+            _tasks[task_id]['status'] = final_status
             _tasks[task_id]['output'] = output
+            if not ok_l1:
+                _tasks[task_id]['anomaly_reason'] = anomaly_reason
 
     except subprocess.TimeoutExpired:
         log_tail = _get_server_log_tail(30)

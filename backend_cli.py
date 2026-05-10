@@ -14,6 +14,7 @@ import subprocess
 import time
 
 from backend import Backend, Job, Result
+from boundary import verify_claude_output  # [2026-04-26 C3] layer 1 verifier
 
 
 class CliBackend(Backend):
@@ -69,11 +70,21 @@ class CliBackend(Backend):
             if proc.stderr:
                 output += f'\n[stderr]: {proc.stderr[:500]}'
             output += f'\n[exit_code]: {proc.returncode}'
+
+            # [2026-04-26 C3] layer 1 boundary verification (entry 5ecbed0b)
+            ok_l1, anomaly_reason = verify_claude_output(
+                proc.returncode, proc.stdout or '', proc.stderr or ''
+            )
+            final_ok = (proc.returncode == 0) and ok_l1
+            if not ok_l1:
+                output += f'\n[layer1_anomaly]: {anomaly_reason}'
+
             return Result(
                 job_id=job.job_id,
-                ok=(proc.returncode == 0),
+                ok=final_ok,
                 output=output,
                 exit_code=proc.returncode,
+                error=(anomaly_reason if not ok_l1 else None),
                 elapsed_sec=elapsed,
                 backend=self.name,
             )
