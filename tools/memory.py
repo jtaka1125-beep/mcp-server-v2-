@@ -1078,6 +1078,21 @@ def tool_memory_fastembed_debug(args: dict) -> dict:
         out['fastembed_ok'] = False
         out['fastembed_error'] = str(e)
 
+    # 4b. fastembed subprocess mode (the normal server runtime path)
+    try:
+        from memory_store import _fastembed_available, _FASTEMBED_VENV_PYTHON
+        out['fastembed_subprocess_ok'] = bool(_fastembed_available())
+        out['fastembed_subprocess_python'] = _FASTEMBED_VENV_PYTHON
+        out['fastembed_embedding_mode'] = (
+            'direct_import' if out.get('fastembed_ok')
+            else 'subprocess' if out.get('fastembed_subprocess_ok')
+            else 'unavailable'
+        )
+    except Exception as e:
+        out['fastembed_subprocess_ok'] = False
+        out['fastembed_subprocess_error'] = str(e)
+        out['fastembed_embedding_mode'] = 'unavailable'
+
     # 5. usearch import
     try:
         from usearch.index import Index
@@ -1133,8 +1148,10 @@ def tool_memory_fastembed_debug(args: dict) -> dict:
 
     # 10. operator summary
     issues = []
-    if not out.get('fastembed_ok'):
-        issues.append('fastembed import failed')
+    if not out.get('fastembed_ok') and not out.get('fastembed_subprocess_ok'):
+        issues.append('fastembed unavailable')
+    elif not out.get('fastembed_ok') and out.get('fastembed_subprocess_ok'):
+        issues.append('embedding via subprocess')
     if not out.get('usearch_ok'):
         issues.append('usearch import failed')
     if not out.get('hnsw_available_result'):
@@ -1146,11 +1163,10 @@ def tool_memory_fastembed_debug(args: dict) -> dict:
     if out.get('sample_backend') == 'fastembed_brute_force':
         issues.append(f'using brute_force (reason: {out.get("fallback_reason", "unknown")})')
 
-    out['operator_summary'] = (
-        f'backend={out.get("sample_backend")}; {"; ".join(issues)}'
-        if issues else
-        f'backend={out.get("sample_backend")}; all checks ok'
-    )
+    if issues:
+        out['operator_summary'] = f'backend={out.get("sample_backend")}; {"; ".join(issues)}'
+    else:
+        out['operator_summary'] = f'backend={out.get("sample_backend")}; all checks ok'
     return out
 
 
