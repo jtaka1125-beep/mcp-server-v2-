@@ -1,135 +1,200 @@
 """
-memory/compact.py - compactロジック
+memory/compact.py v3 (2026-04-26)
 =====================================
-Ollamaは一切使わない。全LLM呼び出しはllm.call()経由。
+変更点:
+  - 時系列セクション必須 (直近 N 日の動向、日付付き)
+  - meta_bootstrap entry と統一フォーマット (テーマ別セクション)
+  - 既存 bootstrap を継承 (増分更新)
+  - msgs 拡大、max_chars 拡大
+  - 「構造や方式に統一感を持たせて時系列が繋がる」(Jun 2026-04-26)
+
+LLM 呼び出しは全て llm.call() 経由 (Ollama 不使用)。
 """
 import re
 import sys
 import os
+import time
+from datetime import datetime, timedelta
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import llm
-from config import COMPACT_LABELS
 
 # ---------------------------------------------------------------------------
-# プロンプトテンプレート
+# プロンプトテンプレート v3
 # ---------------------------------------------------------------------------
-def _build_prompt(text: str, namespace: str, max_chars: int) -> str:
-    # namespace別のラベルヒント
-    hints = {
-        'mx-design':      '主に [設計][理由][commit][廃止] を使え。',
-        'mx-log':         '主に [TODO][実装][バグ][保留][確認待] を使え。',
-        'mirage-android': '主に [設計][実装][デバイス][禁止][commit] を使え。',
-        'mirage-infra':   '主に [実装][環境][パス][TODO][バグ] を使え。',
-        'mirage-vulkan':  '主に [設計][実装][禁止][commit][バグ] を使え。',
-    }
-    label_hint = hints.get(namespace, '')
-    labels_str = ' '.join(COMPACT_LABELS)
+def _build_prompt_v3(text: str, namespace: str, max_chars: int,
+                     prev_summary: str = '') -> str:
+    """v3: 時系列 + テーマ別 + 増分更新対応。
 
-    return f"""以下はMirageSystemの開発ログです。重要な情報を抽出し、必ず以下のフォーマットで出力してください。
+    前回 summary を「過去要約」として LLM に渡し、新規分との統合を依頼する。
+    出力は meta_bootstrap entry と同じ階層構造に揃える。
+    """
+    prev_section = ''
+    if prev_summary:
+        prev_section = (
+            "\n## 前回の要約 (継承元、必要に応じて統合)\n"
+            f"{prev_summary[:1500]}\n"
+        )
 
-【出力フォーマット（厳守）】
-[ラベル] キーワード: 内容
+    return f"""以下は MirageSystem の {namespace} namespace の開発ログです。
+{namespace} 全体の状況を把握できる構造化サマリを生成してください。
 
-【使用するラベル】
-{labels_str}
+【出力フォーマット (厳守、meta_bootstrap entry と統一)】
+
+■ アクティブテーマ
+  _theme:xxx  簡潔な説明 (1 行)
+  _theme:yyy  簡潔な説明
+  ...
+  (3-7 個程度。idx_themes_master のカノニカル名と整合)
+
+■ 直近の重要トピック (時系列、新→古)
+  ## YYYY-MM-DD
+    トピック 1 (1 行)
+    トピック 2
+  ## YYYY-MM-DD
+    ...
+  (直近 14 日が目安、日付ごとにグループ化)
+
+■ 主要設計判断 (現役)
+  - 判断 1
+  - 判断 2
+  ...
+
+■ 既知問題 / 残課題
+  - 問題 1 (1 行)
+  - 問題 2
 
 【ルール】
-- 1行1項目。散文・見出し（**text**）・箇条書き（-や*）は絶対禁止
-- 必ず[ラベル]で始める
-- 最大{min(max_chars, 800)}文字
-- [禁止]タグの項目は必ず保持する
-- {label_hint}
-- MirageSystemの説明は不要（読者は開発者）
+- 全体で {max_chars} 文字以内
+- 各行は簡潔に (1 行 80 文字目安)
+- 散文は禁止、上記構造のみ
+- {namespace} に無関係な内容は含めない
+- 前回要約を踏まえて増分更新する (廃止項目は削除、新規項目は追加)
+- 古い決定が新しい決定で覆されている場合、新しい方を残す
+- 日付は ## YYYY-MM-DD 形式で必ず付ける
+- 日付不明な行は ## (日付不明) でグループ化
+{prev_section}
 
-## 開発ログ
+## 開発ログ (新→古、{len(text)} 文字)
 {text}
 
-上記を[ラベル] キーワード: 内容 形式で出力:"""
+上記フォーマットで出力 (見出し ■ から始める):"""
+
 
 # ---------------------------------------------------------------------------
-# 後処理: 散文→ラベル形式に強制変換
+# 後処理 v3
 # ---------------------------------------------------------------------------
-def _normalize(raw: str, max_chars: int = 800) -> str:
-    label_re = re.compile(r'^\[.+?\]\s+\S')
+def _normalize_v3(raw: str, max_chars: int) -> str:
+    """v3 normalize: ■ で始まる構造を保持、見出し以外の行は許容。"""
     lines = raw.strip().splitlines()
 
-    # すでにラベル形式が半数以上 → そのまま
-    label_count = sum(1 for l in lines if label_re.match(l.strip()))
-    if len(lines) > 0 and label_count / len(lines) >= 0.5:
-        return raw[:max_chars]
+    # ■ で始まる行が 1 つもなければ failure
+    has_section = any(line.strip().startswith('■') for line in lines)
+    if not has_section:
+        # 構造が壊れている場合、先頭に ■ を補う
+        return ('■ 概要 (フォーマット崩壊、要再 compact)\n' + raw)[:max_chars]
 
+    # 余分な空行除去 (連続 2 行以上の空行を 1 行に)
     result = []
+    blank_count = 0
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # 見出し行をスキップ
-        if line.startswith('##') or line.startswith('---'):
-            continue
-        if line.startswith('**') and line.endswith('**'):
-            continue
-        # 既にラベル形式
-        if label_re.match(line):
-            result.append(line)
-            continue
-        # 箇条書き記号を除去
-        line = re.sub(r'^[*\-+]\s+', '', line)
-        line = re.sub(r'^\d+\.\s+', '', line)
-        if not line:
-            continue
-        # キーワードでラベル推定
-        if any(w in line for w in ['禁止', 'H264', 'AOA', 'D3D11', 'banned']):
-            result.append(f'[禁止] {line}')
-        elif any(w in line for w in ['TODO', 'やること', '未解決', '次に']):
-            result.append(f'[TODO] {line}')
-        elif any(w in line for w in ['完了', '実装', '修正', 'commit']):
-            result.append(f'[実装] {line}')
-        elif any(w in line for w in ['設計', '方針', '決定', 'アーキ']):
-            result.append(f'[設計] {line}')
-        elif any(w in line for w in ['保留', '後回し', '動作確認後']):
-            result.append(f'[保留] {line}')
-        elif any(w in line for w in ['バグ', '問題', '不具合', 'エラー']):
-            result.append(f'[バグ] {line}')
+        if not line.strip():
+            blank_count += 1
+            if blank_count <= 1:
+                result.append('')
         else:
-            result.append(f'[実装] {line}')
+            blank_count = 0
+            result.append(line)
 
-    return '\n'.join(result)[:max_chars]
+    joined = '\n'.join(result)
+    if max_chars and len(joined) > max_chars:
+        cut = joined[:max_chars]
+        for sep in ('\n', '。', '、'):
+            idx = cut.rfind(sep)
+            if idx > max_chars // 2:
+                return cut[:idx + len(sep)].rstrip() + ' …'
+        return cut.rstrip() + ' …'
+    return joined
+
 
 # ---------------------------------------------------------------------------
-# メイン: compact実行
+# msgs を時系列ヘッダ付きテキストに整形
 # ---------------------------------------------------------------------------
-def run(namespace: str, msgs: list, max_chars: int = 800) -> dict:
+def _format_msgs_with_dates(msgs: list, max_msgs: int = 50) -> str:
+    """msgs (created_at 含む) を日付グループ化された string に変換。"""
+    grouped = {}  # date_str -> list of contents
+    for m in msgs[:max_msgs]:
+        ts = m.get('created_at', 0)
+        if ts:
+            try:
+                date_str = datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d')
+            except Exception:
+                date_str = '日付不明'
+        else:
+            date_str = '日付不明'
+
+        role = m.get('role', '?')
+        content = m.get('content', '')[:300]
+        grouped.setdefault(date_str, []).append(f"  [{role}] {content}")
+
+    # 新→古 順
+    sorted_dates = sorted(
+        [d for d in grouped.keys() if d != '日付不明'],
+        reverse=True
+    )
+    if '日付不明' in grouped:
+        sorted_dates.append('日付不明')
+
+    parts = []
+    for date_str in sorted_dates:
+        parts.append(f"## {date_str}")
+        parts.extend(grouped[date_str])
+        parts.append('')
+
+    return '\n'.join(parts)
+
+
+# ---------------------------------------------------------------------------
+# メイン: compact 実行 v3
+# ---------------------------------------------------------------------------
+def run(namespace: str, msgs: list, max_chars: int = 2000,
+        prev_summary: str = '') -> dict:
     """
-    messagesリストを受け取り、ラベル形式のbootstrapを返す。
+    msgs リストを受け取り、構造化された bootstrap を返す。
+
+    v3 改修:
+      - 時系列セクション必須
+      - 既存 summary を継承して増分更新
+      - max_chars デフォルト 2000 (旧 800)
 
     Args:
-        namespace: メモリnamespace
-        msgs:      fetch_recent_rawの結果
-        max_chars: 最大文字数
+        namespace:    メモリ namespace
+        msgs:         fetch_recent_raw + decisions の混在 (created_at 含む)
+        max_chars:    最大文字数 (デフォルト 2000)
+        prev_summary: 前回 bootstrap (増分更新用、空文字なら全件再生成)
 
     Returns:
         {'bootstrap': str, 'error': str|None}
     """
-    # mx-constは対象外
     if namespace == 'mx-const':
         return {'bootstrap': '', 'error': 'mx-const is permanent'}
 
     if not msgs:
         return {'bootstrap': '', 'error': 'no messages'}
 
-    # テキスト構築
-    text = '\n---\n'.join(
-        f"[{m.get('role','?')}] {m.get('content','')[:300]}"
-        for m in msgs[:20]
-    )
+    # 時系列ヘッダ付きで整形 (最大 50 msg)
+    text = _format_msgs_with_dates(msgs, max_msgs=50)
 
-    prompt = _build_prompt(text, namespace, max_chars)
-    raw = llm.call(prompt, purpose='compact', max_tokens=800, timeout=30)
+    prompt = _build_prompt_v3(text, namespace, max_chars, prev_summary)
+
+    # max_tokens を max_chars に応じて拡大
+    max_tokens = max(1500, max_chars + 500)
+    raw = llm.call(prompt, purpose='compact_v3',
+                   max_tokens=max_tokens, timeout=60)
 
     if not raw:
         return {'bootstrap': '', 'error': 'all LLM backends failed'}
 
-    # 後処理
-    bootstrap = _normalize(raw, max_chars)
+    bootstrap = _normalize_v3(raw, max_chars)
     return {'bootstrap': bootstrap, 'error': None}
