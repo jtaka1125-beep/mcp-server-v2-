@@ -148,6 +148,209 @@ def tool_chat_with_ai(args: dict) -> dict:
     return {'response': result, 'model': model}
 
 # ---------------------------------------------------------------------------
+# classify_screen (llama-server E4B + mmproj direct, port 8091)
+# ---------------------------------------------------------------------------
+import urllib.request as _urlreq
+import urllib.error as _urlerr
+import json as _json
+
+LLAMA_CLASSIFY_URL = os.environ.get(
+    'LLAMA_CLASSIFY_URL', 'http://127.0.0.1:8091/v1/chat/completions'
+)
+
+CLASSIFY_SYSTEM_PROMPT = (
+    'Classify Android screenshots. Output ONLY valid JSON: '
+    '{"screen": "<class>", "confidence": <0.0-1.0>} '
+    'Classes: ad (any advertisement/install prompt), login, feed, settings, home, dialog, video.'
+)
+
+CLASSIFY_IMAGE_USER_PROMPT = (
+    '"ad" includes app install ads and interstitial ads. Classify this screenshot.'
+)
+
+
+def _classify_call(messages: list, timeout: int) -> dict:
+    payload = {
+        'model': 'gemma4-e4b',
+        'messages': messages,
+        'max_tokens': 32,
+        'temperature': 0.1,
+    }
+    req = _urlreq.Request(
+        LLAMA_CLASSIFY_URL,
+        data=_json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    t0 = time.monotonic()
+    try:
+        with _urlreq.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except (_urlerr.URLError, OSError) as e:
+        return {
+            '_error': f'llama-server unreachable: {e}',
+            '_elapsed_ms': int((time.monotonic() - t0) * 1000),
+        }
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    try:
+        d = _json.loads(body)
+        raw = d['choices'][0]['message']['content']
+    except Exception as e:
+        return {
+            '_error': f'response parse failed: {e}',
+            '_raw': body[:500].decode('utf-8', errors='replace'),
+            '_elapsed_ms': elapsed_ms,
+        }
+    try:
+        si = raw.find('{')
+        ei = raw.rfind('}') + 1
+        parsed = _json.loads(raw[si:ei])
+    except Exception as e:
+        return {'_error': f'classify JSON parse failed: {e}', '_raw': raw, '_elapsed_ms': elapsed_ms}
+    return {'_parsed': parsed, '_raw': raw, '_elapsed_ms': elapsed_ms}
+
+
+# ---------------------------------------------------------------------------
+# dismiss_screen: Phase 2 b — E4B vision で close button 座標を返す
+# ---------------------------------------------------------------------------
+# layer2_cli.py (claude -p) の置換。Layer 2 は目、AX は手 (W15 PhaseB) の
+# vision 部分を E4B に。AX verify は C++ 側で既存 verifyWithAx 流用。
+# 同期先: dismiss_screen_client.cpp (C++ 側 prompt 複製)。
+
+DISMISS_SYSTEM_PROMPT_TEMPLATE = (
+    'Find the close button (X / × / Skip / 閉じる icon) in this Android ad screenshot. '
+    'Output ONLY JSON: {{"x": int, "y": int, "confidence": float}}. '
+    'If no close button is visible, output {{"x": null, "y": null, "confidence": 0.0}}. '
+    'Image is {W}x{H} pixels. Close buttons are typically small (15-50px) in the top-right corner. '
+    'Do NOT pick large install/CTA buttons (would trigger app install). '
+    'Do NOT pick the home indicator at the bottom-edge of the screen.'
+)
+DISMISS_USER_PROMPT = 'Locate the close button. Return JSON only.'
+
+
+def tool_dismiss_screen(args: dict) -> dict:
+    args = args or {}
+    image_path = args.get('image_path') or None
+    timeout = int(args.get('timeout', 30) or 30)
+    frame_w = int(args.get('frame_w', 1200) or 1200)
+    frame_h = int(args.get('frame_h', 2000) or 2000)
+
+    if not image_path:
+        return {'error': 'image_path required'}
+
+    try:
+        with open(image_path, 'rb') as f:
+            b64 = base64.b64encode(f.read()).decode()
+    except Exception as e:
+        return {'error': f'image read failed: {e}', 'details': {'image_path': image_path}}
+
+    sys_prompt = DISMISS_SYSTEM_PROMPT_TEMPLATE.format(W=frame_w, H=frame_h)
+    messages = [
+        {'role': 'system', 'content': sys_prompt},
+        {'role': 'user', 'content': [
+            {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{b64}'}},
+            {'type': 'text', 'text': DISMISS_USER_PROMPT},
+        ]},
+    ]
+
+    # llama-server 直叩き (classify_screen と同じ endpoint、prompt と max_tokens 違い)
+    payload = {
+        'model': 'gemma4-e4b',
+        'messages': messages,
+        'max_tokens': 64,        # 座標 + confidence で classify (32) より長め
+        'temperature': 0.1,
+    }
+    req = _urlreq.Request(
+        LLAMA_CLASSIFY_URL,
+        data=_json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    t0 = time.monotonic()
+    try:
+        with _urlreq.urlopen(req, timeout=timeout) as r:
+            body = r.read()
+    except (_urlerr.URLError, OSError) as e:
+        return {'error': f'llama-server unreachable: {e}',
+                'details': {'elapsed_ms': int((time.monotonic() - t0) * 1000)}}
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    try:
+        d = _json.loads(body)
+        raw = d['choices'][0]['message']['content']
+    except Exception as e:
+        return {'error': f'response parse failed: {e}',
+                'details': {'raw': body[:500].decode('utf-8', errors='replace'),
+                            'elapsed_ms': elapsed_ms}}
+
+    # raw から JSON 抽出
+    try:
+        si = raw.find('{')
+        ei = raw.rfind('}') + 1
+        parsed = _json.loads(raw[si:ei])
+    except Exception as e:
+        return {'error': f'dismiss JSON parse failed: {e}',
+                'details': {'raw': raw, 'elapsed_ms': elapsed_ms}}
+
+    # tap_target shape を Layer2CliResult 互換に整形
+    x = parsed.get('x')
+    y = parsed.get('y')
+    has_target = isinstance(x, (int, float)) and isinstance(y, (int, float))
+    return {
+        'tap_target': {'x': int(x), 'y': int(y)} if has_target else None,
+        'confidence': float(parsed.get('confidence') or 0.0),
+        'reason': parsed.get('reason', ''),
+        'raw': raw,
+        'elapsed_ms': elapsed_ms,
+    }
+
+
+def tool_classify_screen(args: dict) -> dict:
+    args = args or {}
+    ax_dump = args.get('ax_dump') or None
+    image_path = args.get('image_path') or None
+    timeout = int(args.get('timeout', 30) or 30)
+
+    if not ax_dump and not image_path:
+        return {'error': 'either ax_dump or image_path is required'}
+
+    if ax_dump:
+        source = 'ax_priority' if image_path else 'ax_only'
+        messages = [
+            {'role': 'system', 'content': CLASSIFY_SYSTEM_PROMPT},
+            {'role': 'user', 'content': ax_dump},
+        ]
+    else:
+        source = 'image_only'
+        try:
+            with open(image_path, 'rb') as f:
+                b64 = base64.b64encode(f.read()).decode()
+        except Exception as e:
+            return {'error': f'image read failed: {e}', 'details': {'image_path': image_path}}
+        messages = [
+            {'role': 'system', 'content': CLASSIFY_SYSTEM_PROMPT},
+            {'role': 'user', 'content': [
+                {'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{b64}'}},
+                {'type': 'text', 'text': CLASSIFY_IMAGE_USER_PROMPT},
+            ]},
+        ]
+
+    result = _classify_call(messages, timeout)
+    if '_error' in result:
+        details = {k: v for k, v in result.items() if k != '_error'}
+        details['source'] = source
+        return {'error': result['_error'], 'details': details}
+
+    parsed = result['_parsed']
+    return {
+        'screen': parsed.get('screen'),
+        'confidence': parsed.get('confidence'),
+        'source': source,
+        'elapsed_ms': result['_elapsed_ms'],
+        'raw': result['_raw'],
+    }
+
+
+# ---------------------------------------------------------------------------
 # ツール登録テーブル
 # ---------------------------------------------------------------------------
 TOOLS = {
@@ -185,5 +388,36 @@ TOOLS = {
             'model':   {'type': 'string', 'enum': ['groq', 'gemini', 'claude']},
         }, 'required': ['message']},
         'handler': tool_chat_with_ai,
+    },
+    'dismiss_screen': {
+        'description': (
+            'Detect close button coordinates in Android ad screenshot via local '
+            'llama-server (Gemma E4B + mmproj on :8091). Replacement for '
+            'layer2_cli.py (claude -p). Returns {tap_target:{x,y}|null, confidence, '
+            'reason, raw, elapsed_ms}. AX verify is expected to be done by caller '
+            '(C++ side via Layer2CliClient::verifyWithAx).'
+        ),
+        'schema': {'type': 'object', 'properties': {
+            'image_path': {'type': 'string', 'description': 'Absolute path to PNG screenshot'},
+            'frame_w':    {'type': 'integer', 'description': 'Image width in pixels (default 1200)'},
+            'frame_h':    {'type': 'integer', 'description': 'Image height in pixels (default 2000)'},
+            'timeout':    {'type': 'integer', 'description': 'HTTP timeout seconds (default 30)'},
+        }, 'required': ['image_path']},
+        'handler': tool_dismiss_screen,
+    },
+    'classify_screen': {
+        'description': (
+            'Classify an Android screen via local llama-server (Gemma E4B + mmproj on '
+            'http://127.0.0.1:8091). Provide ax_dump (AX SUMMARY string, NOT raw XML) '
+            'or image_path (PNG); both ok -> ax wins. '
+            'Classes: ad, login, feed, settings, home, dialog, video. '
+            'Returns {screen, confidence, source, elapsed_ms, raw}.'
+        ),
+        'schema': {'type': 'object', 'properties': {
+            'ax_dump':    {'type': 'string', 'description': 'AX summary string. Caller summarizes the AX tree to a short hint line; raw XML will exceed ctx and likely misclassify. Example: "AX tree: FrameLayout root > FrameLayout ia_clickable_close_button clickable=true > TextView ad_label text=\\"AD\\" > Activity=TTFullScreenVideoActivity. Classify."'},
+            'image_path': {'type': 'string', 'description': 'Absolute path to PNG screenshot'},
+            'timeout':    {'type': 'integer', 'description': 'HTTP timeout seconds (default 30)'},
+        }},
+        'handler': tool_classify_screen,
     },
 }

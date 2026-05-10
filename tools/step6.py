@@ -97,7 +97,62 @@ confidence: 判定の確信度 (0.0-1.0)、reason に根拠を簡潔に。
 """
 
 
-def _build_stage2_prompt(crop_path: str) -> str:
+# ---------------------------------------------------------------------------
+# [Phase F] AX (Accessibility) dump fetch via macro_api 'ui_tree' RPC
+# ---------------------------------------------------------------------------
+
+def _fetch_ax_dump(device_id: str, save_path: str, timeout_s: float = 5.0) -> bool:
+    """Call macro_api 'ui_tree' RPC and save AccessibilityNodeInfo tree JSON.
+
+    Returns True if file saved with valid JSON, False on failure.
+    Caller may proceed without AX info; CC will fall back to OCR/image_diff_overlap.
+    """
+    import socket as _sock
+    try:
+        req = {"id": 1, "method": "ui_tree", "params": {"device_id": device_id}}
+        req_bytes = (json.dumps(req) + "\n").encode("utf-8")
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+        s.settimeout(timeout_s)
+        s.connect(("127.0.0.1", 19840))
+        s.sendall(req_bytes)
+        buf = b""
+        while True:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+            if b"\n" in buf:
+                break
+        s.close()
+        if b"\n" not in buf:
+            return False
+        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8", errors="replace"))
+        result = resp.get("result", {})
+        if result.get("status") != "ok":
+            return False
+        ui_tree = result.get("ui_tree")
+        if ui_tree is None:
+            return False
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        with open(save_path, "w", encoding="utf-8") as f:
+            json.dump(ui_tree, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _build_stage2_prompt(crop_path: str, ax_dump_path: Optional[str] = None) -> str:
+    ax_block = ""
+    if ax_dump_path and os.path.exists(ax_dump_path):
+        ax_block = f"""
+[Phase F] AccessibilityNodeInfo tree (利用可能):
+@{ax_dump_path}
+このファイルを Read してください。target2_overlap 領域内に clickable=true で
+resource_id を持つノードがあれば、target.type=resource_id を優先してください。
+clickable=true で text を持つノードしかなければ target.type=text を選択。
+どちらもなければ既存の ocr / image_diff_overlap にフォールバック。
+"""
+
     return f"""[単発画像判定タスク (継続)]
 - CLAUDE.md の MANDATORY FIRST STEP は適用外
 - 外部記憶アクセス不要、画像と JSON 出力のみ
@@ -106,12 +161,19 @@ def _build_stage2_prompt(crop_path: str) -> str:
 CC 自身が crop した画像です:
 @{crop_path}
 crop 画像の実寸は PIL.Image.open で自分で取得してください。
-
+{ax_block}
 以下の JSON で詳細を返してください:
 
 {{ "detail_coords": {{"x": int, "y": int}} | null,
   "ocr_text": str,
   "template_metadata": {{
+    // [Phase F] AX 由来 resource_id/text があれば target を出力 (type=resource_id|text)
+    // ない場合は target1/target2 の既存 schema (type=ocr|image_diff_overlap) を使う
+    "target": {{
+      "type": "resource_id" | "text",
+      "value": str,
+      "tap_offset": {{"dx": int, "dy": int}}
+    }} | null,
     "target1": {{
       "type": "ocr",
       "patterns": [list of str],
@@ -315,7 +377,15 @@ def tool_step6_run(args: dict) -> dict:
     # =====================================
     # Stage 2: detailed extraction + save (fresh subprocess)
     # =====================================
-    prompt2 = _build_stage2_prompt(crop_path)
+    # [Phase F] Fetch AX dump for resource_id/text-based targets
+    ax_dump_path = os.path.join(log_dir, "03_ax_dump.json")
+    ax_ok = _fetch_ax_dump(device_id, ax_dump_path)
+    if ax_ok:
+        _save_log(log_dir, "03_ax_dump_ok.txt", f"AX dump saved: {ax_dump_path}")
+    else:
+        ax_dump_path = None  # CC は AX なしで OCR/image_diff_overlap fallback
+
+    prompt2 = _build_stage2_prompt(crop_path, ax_dump_path)
     _save_log(log_dir, "04_stage2_prompt.txt", prompt2)
 
     r2 = _run_claude_p(prompt2)
