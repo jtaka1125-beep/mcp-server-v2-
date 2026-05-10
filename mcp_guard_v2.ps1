@@ -60,6 +60,10 @@ function Kill-V2 {
 function Start-V2Server {
     Kill-V2
     $env:PATH = "C:\Users\jun\.local\bin;$env:PATH"
+    # [2026-04-26 C1] dispatcher 一本化: legacy tools/task.py の代わりに
+    # tools/task_v2.py + dispatcher.py + backend_cli.py 経由で run_task を処理。
+    # 観察期間 3 日 (2026-04-29 まで)、問題なければ legacy 退避予定。
+    $env:V2_USE_DISPATCHER = '1'
     try {
         $cb = (reg query HKCU\Environment /v CEREBRAS_API_KEY 2>$null)
         if ($cb) { $env:CEREBRAS_API_KEY = ($cb -split '\s+')[-1] }
