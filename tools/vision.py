@@ -168,6 +168,11 @@ CLASSIFY_SYSTEM_PROMPT = (
 # background, text-heavy layout, and no explicit "AD" label are easy to confuse
 # with feed/login. Anchor on structural ad markers (top-right close X + single
 # dominant CTA) which are present even in minimal designs.
+# [P0 #3 attempt 2026-05-11 reverted] Tried schema strict enum to suppress
+# out-of-vocab "game". But the in-prompt "gameplay → home" mapping caused
+# regression: image-rich game ads (gameplay imagery + Google Play badge)
+# got classified as "home" 0.95 instead of "ad". Reverted; out-of-vocab is
+# accepted as a minor downstream issue (Mirage gates on screen=="ad" only).
 CLASSIFY_IMAGE_USER_PROMPT = (
     '"ad" includes app install ads and interstitial ads. '
     'IMPORTANT: even when the page looks minimal (white background, plain text, no "AD" label), '
