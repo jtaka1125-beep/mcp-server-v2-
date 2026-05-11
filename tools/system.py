@@ -320,6 +320,11 @@ def tool_mcp_health_report(args: dict) -> dict:
     v1 = _http_json('http://127.0.0.1:3000/health', timeout=3)
     v2 = _http_json('http://127.0.0.1:3001/health', timeout=3)
     v2_deep = _http_json('http://127.0.0.1:3001/health/deep', timeout=10) if include_deep else None
+    # Probe layer-2 vision daemons. These don't have to be alive for V1/V2 to
+    # work, but their state is operationally relevant (Gemini quota / CDP
+    # browser availability frequently silently breaks classify_screen).
+    gemini_router = _http_json('http://127.0.0.1:17263/health', timeout=2)
+    llama_server = _http_json('http://127.0.0.1:8091/health', timeout=2)
     git_report = tool_git_dirty_report({}) if include_git else None
 
     v1_json = v1.get('json') or {}
@@ -345,6 +350,10 @@ def tool_mcp_health_report(args: dict) -> dict:
         warnings.append('v1_health_payload_outdated')
     if git_report and int(git_report.get('git_warnings') or 0) > 0:
         warnings.append('git_status_warnings')
+    if not gemini_router.get('ok'):
+        warnings.append('gemini_router_unreachable')
+    if not llama_server.get('ok'):
+        warnings.append('llama_server_unreachable')
 
     status = 'ok' if not issues else 'degraded'
 
@@ -366,6 +375,8 @@ def tool_mcp_health_report(args: dict) -> dict:
             hints = {
                 'v1_health_payload_outdated': 'outdated V1 payload (resolves on next V1 restart)',
                 'git_status_warnings': 'git status has warnings (check git_dirty_report)',
+                'gemini_router_unreachable': 'gemini_router (:17263) down -- classify_screen will fail',
+                'llama_server_unreachable': 'llama-server (:8091) down -- E4B vision unavailable',
             }
             desc = hints.get(w, w)
             return f'ok; warning: {desc}; no action required'
@@ -387,6 +398,10 @@ def tool_mcp_health_report(args: dict) -> dict:
             'memory_db_ok': deep_json.get('memory_db_ok'),
             'semantic_lite_ok': deep_json.get('semantic_lite_ok'),
             'maintenance_recommended_count': deep_json.get('maintenance_recommended_count'),
+            'gemini_router_ok': bool(gemini_router.get('ok')),
+            'gemini_router_latency_ms': gemini_router.get('latency_ms'),
+            'llama_server_ok': bool(llama_server.get('ok')),
+            'llama_server_latency_ms': llama_server.get('latency_ms'),
             'source_dirty': git_report.get('source_dirty') if git_report else None,
             'known_dirty': git_report.get('known_dirty') if git_report else None,
             'known_dirty_policy_ok': (
