@@ -470,6 +470,14 @@ def tool_windows_filesystem(args: dict) -> dict:
     path = args.get("path")
     if not mode or not path:
         return {"error": "mode and path required"}
+    # Path-traversal validation (mirror system.py:_validate_path).
+    # path is mandatory; dst_path is used by copy/move and is also validated.
+    for key in ("path", "dst_path"):
+        v = args.get(key)
+        if not v:
+            continue
+        if ".." in str(v).replace("\\", "/").split("/"):
+            return {"error": f"{key} traversal denied (.. segment): {v!r}"}
     if mode == "delete":
         err = _confirm("windows_filesystem:delete", args)
         if err:
