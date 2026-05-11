@@ -179,6 +179,19 @@ def _query_bool(qs: dict, name: str, default: bool) -> bool:
 # ---------------------------------------------------------------------------
 # MCP ハンドラ
 # ---------------------------------------------------------------------------
+def _tools_version() -> str:
+    """Stable hash of the current tool registry (names + descriptions).
+    Bumps whenever a tool is added/removed/renamed/redescribed. Clients that
+    re-poll tools/list can detect drift via this field without diffing.
+    """
+    import hashlib
+    payload = '\n'.join(
+        f'{name}\t{spec.get("description", "")}'
+        for name, spec in sorted(TOOLS.items())
+    )
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]
+
+
 def handle_tools_list() -> dict:
     return {
         'tools': [
@@ -188,7 +201,9 @@ def handle_tools_list() -> dict:
                 'inputSchema': spec.get('schema', {}),
             }
             for name, spec in TOOLS.items()
-        ]
+        ],
+        '_tools_version': _tools_version(),
+        '_tools_count': len(TOOLS),
     }
 
 
