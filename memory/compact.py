@@ -60,6 +60,7 @@ def _build_prompt_v3(text: str, namespace: str, max_chars: int,
   - 判断 1
   - 判断 2
   ...
+  (5-8 個以内、意味的重複を統合してまとめる)
 
 ■ 既知問題 / 残課題
   - 問題 1 (1 行)
@@ -74,6 +75,12 @@ def _build_prompt_v3(text: str, namespace: str, max_chars: int,
 - 古い決定が新しい決定で覆されている場合、新しい方を残す
 - 日付は ## YYYY-MM-DD 形式で必ず付ける
 - 日付不明な行は ## (日付不明) でグループ化
+- **「主要設計判断」での意味的重複を必ず統合する**:
+  - 同じ機能領域・同じ目的の判断は語が違っても 1 つに集約
+  - 例: "fastembed の開発" / "memory_fastembed の開発" / "memory_link_health の開発" /
+    "MCPサーバーの信頼性改善" のような並列名は「外部記憶基盤 (fastembed/link_health 等) の信頼性強化」のように 1 行に統合
+  - 5-8 件以内に収まらない場合は、より上位の概念で括る
+  - 前回要約に重複が残っていても、本回出力では統合し直す
 {prev_section}
 
 ## 開発ログ (新→古、{len(text)} 文字)
