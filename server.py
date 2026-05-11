@@ -250,6 +250,24 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _auth_ok(self) -> bool:
+        """V2-level Bearer check (defense in depth alongside buffer_proxy).
+        Disabled when MIRAGE_MCP_TOKEN env is unset. /health and /restart are
+        exempt so loopback callers (V1 health-check, mcp_guard_v2 restart
+        trigger) keep working.
+        """
+        token = os.environ.get('MIRAGE_MCP_TOKEN', '')
+        if not token:
+            return True
+        # path may include query string; strip it for the exempt check
+        path = (self.path or '').split('?', 1)[0]
+        if path in ('/', '/health', '/health/deep', '/health/report', '/restart'):
+            return True
+        auth = self.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return False
+        return auth[len('Bearer '):].strip() == token
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -258,6 +276,10 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if not self._auth_ok():
+            self._send_json(401, {'error': 'unauthorized',
+                                   'hint': 'set Authorization: Bearer <MIRAGE_MCP_TOKEN>'})
+            return
         import urllib.parse
         parsed = urllib.parse.urlparse(self.path)
         qs = urllib.parse.parse_qs(parsed.query)
@@ -425,6 +447,10 @@ class MCPHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": str(e)})
 
     def do_POST(self):
+        if not self._auth_ok():
+            self._send_json(401, {'error': 'unauthorized',
+                                   'hint': 'set Authorization: Bearer <MIRAGE_MCP_TOKEN>'})
+            return
         # REST POST routing (P0-2.5 aftermath fix, 2026-04-18):
         # v2 server was JSON-RPC only; REST paths like /api/v1/memory/compact
         # fell through to the JSON-RPC dispatcher which returned an empty
