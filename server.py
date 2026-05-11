@@ -322,6 +322,10 @@ class MCPHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Access-Control-Allow-Origin', '*')
+        # Prevent Cloudflare edge from caching realtime API state (memory writes,
+        # context, health). claude.ai web_fetch cannot use cache-buster URLs
+        # because of its allowlist, so the API itself must opt out of caching.
+        self.send_header('Cache-Control', 'no-store, max-age=0')
         self.end_headers()
         self.wfile.write(data)
 
