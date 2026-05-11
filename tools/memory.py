@@ -524,21 +524,28 @@ def tool_memory_supersede_many(args: dict) -> dict:
       - pairs: [{'old_id': prefix, 'new_id': prefix}, ...]
       - olds + new_id: olds=[prefix, ...], new_id=prefix  (many-to-one shortcut)
     8-char prefixes are auto-resolved.
+
+    dry_run=True (default false): resolve and validate all pairs, but do NOT
+    persist any supersede. Returns the same shape as a real run but with
+    'would_supersede' counts instead of 'succeeded'/'failed'. Useful to preview
+    a large bulk operation (Iron Law canonical absorbing N old decisions).
     """
     pairs = (args or {}).get('pairs') or []
     olds = (args or {}).get('olds') or []
     shared_new = (args or {}).get('new_id', '')
+    dry_run = bool((args or {}).get('dry_run', False))
     if olds and shared_new:
         pairs = pairs + [{'old_id': o, 'new_id': shared_new} for o in olds]
     if not pairs:
         return {'error': 'provide pairs=[{old_id,new_id},...] or olds=[...]+new_id'}
     try:
-        from memory_store import supersede_entry
+        from memory_store import supersede_entry, get_entry_full
     except Exception as e:
         return {'error': f'memory_store import failed: {e}'}
     results = []
     ok = 0
     failed = 0
+    would_succeed = 0
     for p in pairs:
         old_in = (p or {}).get('old_id', '')
         new_in = (p or {}).get('new_id', '')
@@ -554,6 +561,37 @@ def tool_memory_supersede_many(args: dict) -> dict:
                             'old_id_input': old_in, 'new_id_input': new_in})
             failed += 1
             continue
+        if dry_run:
+            # validate both ends exist + check status without mutating
+            try:
+                old_entry = get_entry_full(old_full)
+                new_entry = get_entry_full(new_full)
+                if 'error' in (old_entry or {}):
+                    results.append({'ok': False, 'error': f'old not found: {old_entry["error"]}',
+                                    'old_id_input': old_in, 'new_id_input': new_in})
+                    failed += 1
+                    continue
+                if 'error' in (new_entry or {}):
+                    results.append({'ok': False, 'error': f'new not found: {new_entry["error"]}',
+                                    'old_id_input': old_in, 'new_id_input': new_in})
+                    failed += 1
+                    continue
+                old_status = (old_entry or {}).get('status') or 'active'
+                results.append({
+                    'ok': True, 'dry_run': True,
+                    'old_id_input': old_in, 'new_id_input': new_in,
+                    'old_id': old_full, 'new_id': new_full,
+                    'old_status_current': old_status,
+                    'old_title': (old_entry or {}).get('title', '')[:60],
+                    'new_title': (new_entry or {}).get('title', '')[:60],
+                    'would_change_status_to': 'superseded',
+                })
+                would_succeed += 1
+            except Exception as e:
+                failed += 1
+                results.append({'ok': False, 'error': str(e), 'dry_run': True,
+                                'old_id_input': old_in, 'new_id_input': new_in})
+            continue
         try:
             r = supersede_entry(old_full, new_full)
             r_ok = bool(r.get('ok', True)) and 'error' not in r
@@ -566,6 +604,15 @@ def tool_memory_supersede_many(args: dict) -> dict:
             failed += 1
             results.append({'ok': False, 'error': str(e),
                             'old_id_input': old_in, 'new_id_input': new_in})
+    if dry_run:
+        return {
+            'total': len(pairs),
+            'dry_run': True,
+            'would_succeed': would_succeed,
+            'failed': failed,
+            'results': results,
+            'operator_summary': f'supersede_many [dry_run]: would supersede {would_succeed}/{len(pairs)}, {failed} would fail',
+        }
     return {
         'total': len(pairs),
         'succeeded': ok,
@@ -3893,11 +3940,12 @@ TOOLS = {
         'handler': tool_memory_supersede,
     },
     'memory_supersede_many': {
-        'description': 'Bulk supersede. pairs=[{old_id,new_id},...] or olds=[...]+new_id (many-to-one). Prefixes auto-resolved.',
+        'description': 'Bulk supersede. pairs=[{old_id,new_id},...] or olds=[...]+new_id (many-to-one). Prefixes auto-resolved. dry_run=true to preview without mutating.',
         'schema': {'type': 'object', 'properties': {
             'pairs': {'type': 'array', 'items': {'type': 'object'}},
             'olds': {'type': 'array', 'items': {'type': 'string'}},
             'new_id': {'type': 'string'},
+            'dry_run': {'type': 'boolean'},
         }},
         'handler': tool_memory_supersede_many,
     },

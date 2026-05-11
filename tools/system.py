@@ -18,10 +18,44 @@ from config import MIRAGE_DIR
 
 log = logging.getLogger(__name__)
 
+def _validate_path(path: str) -> tuple:
+    """Reject obvious path-traversal patterns. Returns (ok, error_msg).
+
+    Default behavior: deny `..` segments in the INPUT path (before
+    normalization), because os.path.normpath silently resolves '..' which
+    masked the traversal. If env var MIRAGE_PATH_ALLOWLIST is set
+    (semicolon-separated list of allowed root dirs), also enforce that the
+    resolved path is under one of those roots.
+    """
+    if not path:
+        return (False, 'path required')
+    # Check raw input for '..' segments BEFORE normpath collapses them.
+    raw_parts = path.replace('\\', '/').split('/')
+    if '..' in raw_parts:
+        return (False, f'path traversal denied (.. segment): {path!r}')
+    try:
+        abs_path = os.path.abspath(path)
+    except Exception as e:
+        return (False, f'invalid path: {e}')
+    allowlist = os.environ.get('MIRAGE_PATH_ALLOWLIST', '').strip()
+    if allowlist:
+        roots = [os.path.abspath(r.strip()) for r in allowlist.split(';') if r.strip()]
+        if not any(abs_path == r or abs_path.startswith(r + os.sep) for r in roots):
+            return (False, f'path {abs_path!r} not under any MIRAGE_PATH_ALLOWLIST root')
+    return (True, '')
+
+
 # ---------------------------------------------------------------------------
 # run_command
 # ---------------------------------------------------------------------------
 def tool_run_command(args: dict) -> dict:
+    # Kill switch: set MIRAGE_DISABLE_RUN_COMMAND=1 in env to refuse all run_command
+    # calls. Useful when V2 is exposed via tunnel and you don't want arbitrary
+    # shell execution available to that surface. Default: enabled (backwards compat).
+    if os.environ.get('MIRAGE_DISABLE_RUN_COMMAND') == '1':
+        return {'ok': False, 'exit_code': -1,
+                'error': 'run_command disabled by MIRAGE_DISABLE_RUN_COMMAND=1'}
+
     cmd     = (args or {}).get('command', '')
     cwd     = (args or {}).get('cwd', MIRAGE_DIR)
     timeout = int((args or {}).get('timeout', 30) or 30)
@@ -49,8 +83,9 @@ def tool_run_command(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 def tool_read_file(args: dict) -> dict:
     path = (args or {}).get('path', '')
-    if not path:
-        return {'error': 'path required'}
+    ok, msg = _validate_path(path)
+    if not ok:
+        return {'error': msg}
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as f:
             content = f.read()
@@ -64,8 +99,9 @@ def tool_read_file(args: dict) -> dict:
 def tool_write_file(args: dict) -> dict:
     path    = (args or {}).get('path', '')
     content = (args or {}).get('content', '')
-    if not path:
-        return {'error': 'path required'}
+    ok, msg = _validate_path(path)
+    if not ok:
+        return {'error': msg}
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
@@ -81,8 +117,11 @@ def tool_write_file_b64(args: dict) -> dict:
     path    = (args or {}).get('path', '')
     data_b64 = (args or {}).get('data_b64', '')
     mode    = (args or {}).get('mode', 'overwrite')  # 'overwrite' | 'append'
-    if not path or not data_b64:
-        return {'error': 'path and data_b64 required'}
+    ok, msg = _validate_path(path)
+    if not ok:
+        return {'error': msg}
+    if not data_b64:
+        return {'error': 'data_b64 required'}
     try:
         data = base64.b64decode(data_b64)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -663,6 +702,13 @@ def tool_build_and_report(args: dict) -> dict:
     config     = (args or {}).get('config', 'Debug')
     max_errors = int((args or {}).get('max_errors', 20) or 20)
     jobs       = int((args or {}).get('jobs', 4) or 4)
+
+    # target / config go into shell=True command; whitelist to prevent injection.
+    _name_re = _re.compile(r'^[A-Za-z0-9_\-]+$')
+    if target and not _name_re.match(str(target)):
+        return {'ok': False, 'error': f'invalid target {target!r}; must match ^[A-Za-z0-9_\\-]+$'}
+    if not _name_re.match(str(config)):
+        return {'ok': False, 'error': f'invalid config {config!r}; must match ^[A-Za-z0-9_\\-]+$'}
 
     cmd = f'cmake --build . --config {config} --parallel {jobs}'
     if target:

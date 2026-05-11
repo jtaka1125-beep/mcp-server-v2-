@@ -17,10 +17,18 @@ BUILD_DIR = os.path.join(MIRAGE_DIR, 'build')
 # ---------------------------------------------------------------------------
 # build_mirage
 # ---------------------------------------------------------------------------
+_TARGET_RE = __import__('re').compile(r'^[A-Za-z0-9_\-]+$')
+
+
 def tool_build_mirage(args: dict) -> dict:
     target  = (args or {}).get('target', 'mirage_vulkan')
     jobs    = int((args or {}).get('jobs', 4) or 4)
     timeout = int((args or {}).get('timeout', 300) or 300)
+
+    # target は shell=True 経路に入るので whitelist 必須 (alphanumeric + _ -)
+    if not isinstance(target, str) or not _TARGET_RE.match(target):
+        return {'ok': False,
+                'error': f'invalid target {target!r}; must match ^[A-Za-z0-9_\\-]+$'}
 
     # 実行中のGUIをkill（Permission denied防止）
     subprocess.run('taskkill /F /IM mirage_vulkan.exe 2>nul',
