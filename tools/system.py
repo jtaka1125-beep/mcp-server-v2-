@@ -392,14 +392,48 @@ def _check_v1_cached():
     return result
 
 
+def _init_cpu_meters():
+    """Warm up psutil cpu_percent counters so subsequent interval=None calls return real deltas."""
+    import psutil, os
+    proc = psutil.Process(os.getpid())
+    try:
+        psutil.cpu_percent(interval=None)  # seed system-wide
+        proc.cpu_percent(interval=None)  # seed v2 process
+    except Exception:
+        pass
+    return proc
+
+
+_v2_proc = _init_cpu_meters()
+
+
 def tool_status(args: dict) -> dict:
     import psutil
+    # system_cpu_percent is INTENTIONALLY OMITTED in this env:
+    # V2 runs on Windows Store Python sandbox where psutil.cpu_times().idle
+    # counter does not advance, causing cpu_percent() to always return 100.0.
+    # This previously caused misdiagnosis (e.g. "V2 占有説" while system actually
+    # idle). For system-wide CPU, run externally:
+    #   Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 1
+    try:
+        v2_cpu_raw = _v2_proc.cpu_percent(interval=None)
+        cores = max(1, psutil.cpu_count(logical=True) or 1)
+        v2_cpu = round(v2_cpu_raw / cores, 1)
+    except Exception:
+        v2_cpu_raw = 0.0
+        v2_cpu = 0.0
     result = {
         'server_v2': 'running',
         'port': 3001,
-        'cpu_percent': psutil.cpu_percent(interval=0.1),
+        'v2_cpu_percent': v2_cpu,
+        'v2_cpu_percent_raw_sum': v2_cpu_raw,  # >100 normal on multicore (sum across cores)
         'memory_percent': psutil.virtual_memory().percent,
         'uptime_sec': time.time() - _start_time,
+        'cpu_note': (
+            'system_cpu_percent omitted (psutil unreliable under Windows Store Python '
+            'sandbox: idle counter does not advance). v2_cpu_percent = V2 process only, '
+            'normalized to 0-100. For system-wide CPU use Get-Counter externally.'
+        ),
     }
     v1_status, v1_reason = _check_v1_cached()
     result['server_v1'] = v1_status
