@@ -74,6 +74,9 @@ function Start-V2Server {
     } catch {}
     $p = Start-Process $PYTHON -ArgumentList $SCRIPT -WorkingDirectory $WORKDIR -WindowStyle Hidden -PassThru
     Write-Log "Started V2 PID $($p.Id)"
+    # Wait up to 180s (180 iterations x 1s) for V2 to write its PID file.
+    # (Old comment claimed 20s which was wrong by 9x; left here in English so
+    #  future readers see the corrected bound regardless of cp932 mojibake.)
     # 譛螟ｧ 20 遘貞ｾ・ｩ滂ｼ・ID繝輔ぃ繧､繝ｫ縺梧嶌縺九ｌ繧九∪縺ｧ・・
     for ($i = 0; $i -lt 180; $i++) {
         Start-Sleep 1
