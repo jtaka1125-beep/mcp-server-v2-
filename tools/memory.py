@@ -1592,7 +1592,25 @@ def tool_memory_fastembed_search(args: dict) -> dict:
     namespace = (args or {}).get('namespace', None)
     limit = int((args or {}).get('limit', 5))
     min_score = float((args or {}).get('min_score', 0.3))
-    return fastembed_search(query, namespace=namespace, limit=limit, min_score=min_score)
+    _types = (args or {}).get('types', None)
+    if isinstance(_types, str) and _types:
+        # Some MCP transports serialize arrays as JSON strings — decode first.
+        s = _types.strip()
+        if s.startswith('[') and s.endswith(']'):
+            try:
+                import json as _j
+                parsed = _j.loads(s)
+                if isinstance(parsed, list):
+                    _types = parsed
+            except Exception:
+                pass
+    if isinstance(_types, list):
+        _types = [str(t) for t in _types if t]
+    elif isinstance(_types, str) and _types:
+        _types = [_types]
+    else:
+        _types = None
+    return fastembed_search(query, namespace=namespace, limit=limit, min_score=min_score, types=_types)
 
 
 def tool_memory_fastembed_status(args: dict) -> dict:
@@ -4163,6 +4181,7 @@ TOOLS = {
             'namespace': {'type': 'string'},
             'limit': {'type': 'integer'},
             'min_score': {'type': 'number', 'description': 'Minimum cosine similarity (default 0.3)'},
+            'types': {'type': 'array', 'items': {'type': 'string'}, 'description': 'Filter by entry type, e.g. ["decision","fact"]. Widens candidate pool 10x to keep result count usable.'},
         }, 'required': ['query']},
     },
     'memory_fastembed_status': {
