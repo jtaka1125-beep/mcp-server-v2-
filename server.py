@@ -576,8 +576,11 @@ if __name__ == '__main__':
     try:
         hb = threading.Thread(target=_heartbeat_loop, daemon=True)
         hb.start()
-        server = ExclusiveThreadingHTTPServer(('0.0.0.0', PORT_NEW), MCPHandler)
-        log.info(f'mcp-server-v2 listening on port {PORT_NEW}')
+        # bind 127.0.0.1 only: V2 is reached via V1 (also localhost) and
+        # buffer_proxy (also localhost). LAN exposure is unintended attack
+        # surface (no auth in V2 tools dispatch).
+        server = ExclusiveThreadingHTTPServer(('127.0.0.1', PORT_NEW), MCPHandler)
+        log.info(f'mcp-server-v2 listening on 127.0.0.1:{PORT_NEW} (loopback only)')
         log.info(f'Fallback: http://localhost:3000')
         server.serve_forever()
     except KeyboardInterrupt:
