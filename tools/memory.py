@@ -472,16 +472,107 @@ def tool_memory_decision_auto(args: dict) -> dict:
 # ---------------------------------------------------------------------------
 # memory_supersede
 # ---------------------------------------------------------------------------
+def _resolve_entry_id(prefix: str) -> str:
+    """Resolve an 8-char (or any partial) prefix to full entry UUID.
+    Returns the full id if exactly one match, else returns the input unchanged
+    (caller will hit supersede_entry's "not found" path with informative error).
+    """
+    if not prefix or '-' in prefix and len(prefix) >= 32:
+        return prefix
+    try:
+        con = sqlite3.connect(_memory_db_path())
+        try:
+            rows = con.execute(
+                "SELECT id FROM entries WHERE id LIKE ? LIMIT 2",
+                (prefix + '%',),
+            ).fetchall()
+        finally:
+            con.close()
+        if len(rows) == 1:
+            return rows[0][0]
+    except Exception:
+        pass
+    return prefix
+
+
 def tool_memory_supersede(args: dict) -> dict:
     old_id = (args or {}).get('old_id', '')
     new_id = (args or {}).get('new_id', '')
     if not old_id or not new_id:
         return {'error': 'old_id and new_id required'}
+    old_full = _resolve_entry_id(old_id)
+    new_full = _resolve_entry_id(new_id)
+    if old_full == new_full:
+        return {'ok': False, 'error': 'old_id == new_id (self-supersede blocked)',
+                'old_id': old_full, 'new_id': new_full}
     try:
         from memory_store import supersede_entry
-        return supersede_entry(old_id, new_id)
+        result = supersede_entry(old_full, new_full)
+        if old_full != old_id or new_full != new_id:
+            result.setdefault('resolved', {})
+            if old_full != old_id:
+                result['resolved']['old_id'] = old_full
+            if new_full != new_id:
+                result['resolved']['new_id'] = new_full
+        return result
     except Exception as e:
         return {'error': str(e)}
+
+
+def tool_memory_supersede_many(args: dict) -> dict:
+    """Bulk supersede. Accepts either:
+      - pairs: [{'old_id': prefix, 'new_id': prefix}, ...]
+      - olds + new_id: olds=[prefix, ...], new_id=prefix  (many-to-one shortcut)
+    8-char prefixes are auto-resolved.
+    """
+    pairs = (args or {}).get('pairs') or []
+    olds = (args or {}).get('olds') or []
+    shared_new = (args or {}).get('new_id', '')
+    if olds and shared_new:
+        pairs = pairs + [{'old_id': o, 'new_id': shared_new} for o in olds]
+    if not pairs:
+        return {'error': 'provide pairs=[{old_id,new_id},...] or olds=[...]+new_id'}
+    try:
+        from memory_store import supersede_entry
+    except Exception as e:
+        return {'error': f'memory_store import failed: {e}'}
+    results = []
+    ok = 0
+    failed = 0
+    for p in pairs:
+        old_in = (p or {}).get('old_id', '')
+        new_in = (p or {}).get('new_id', '')
+        if not old_in or not new_in:
+            results.append({'ok': False, 'error': 'old_id and new_id required',
+                            'old_id': old_in, 'new_id': new_in})
+            failed += 1
+            continue
+        old_full = _resolve_entry_id(old_in)
+        new_full = _resolve_entry_id(new_in)
+        if old_full == new_full:
+            results.append({'ok': False, 'error': 'old_id == new_id, skipping self-supersede',
+                            'old_id_input': old_in, 'new_id_input': new_in})
+            failed += 1
+            continue
+        try:
+            r = supersede_entry(old_full, new_full)
+            r_ok = bool(r.get('ok', True)) and 'error' not in r
+            if r_ok:
+                ok += 1
+            else:
+                failed += 1
+            results.append({**r, 'old_id_input': old_in, 'new_id_input': new_in})
+        except Exception as e:
+            failed += 1
+            results.append({'ok': False, 'error': str(e),
+                            'old_id_input': old_in, 'new_id_input': new_in})
+    return {
+        'total': len(pairs),
+        'succeeded': ok,
+        'failed': failed,
+        'results': results,
+        'operator_summary': f'supersede_many: {ok}/{len(pairs)} ok, {failed} failed',
+    }
 
 # ---------------------------------------------------------------------------
 # memory_get (fetch full entry by id)
@@ -548,13 +639,19 @@ def tool_memory_lifecycle_review(args: dict) -> dict:
         params.extend([like, like, like])
     if not include_archived:
         where.append("(status IS NULL OR status NOT IN ('archived'))")
+    # tags は JSON 配列文字列で保存されているため、各タグを `"tag"` パターンで SQL レベル絞り込み。
+    # LIKE のワイルドカード `_` `%` がタグ名に含まれても誤マッチしないよう ESCAPE する。
+    for tag in tags:
+        safe = tag.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+        where.append("tags LIKE ? ESCAPE '\\'")
+        params.append(f'%"{safe}"%')
     sql = (
         'SELECT id, namespace, type, title, tags, status, created_at, updated_at, '
         'superseded_by, COALESCE(access_count,0) AS access_count '
         'FROM entries WHERE ' + ' AND '.join(where) +
         ' ORDER BY created_at DESC LIMIT ?'
     )
-    params.append(limit * 4 if tags else limit)
+    params.append(limit)
     con = sqlite3.connect(_memory_db_path())
     con.row_factory = sqlite3.Row
     try:
@@ -654,6 +751,137 @@ def tool_memory_archive_by_query(args: dict) -> dict:
     finally:
         con.close()
     return result
+
+
+def _tag_like_pattern(tag: str) -> str:
+    safe = tag.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return f'%"{safe}"%'
+
+
+def _find_entries_with_tag(con, ns: str, tag: str, limit: int):
+    where = ["tags LIKE ? ESCAPE '\\'", "(status IS NULL OR status='active')"]
+    params = [_tag_like_pattern(tag)]
+    if ns:
+        where.insert(0, "namespace=?")
+        params.insert(0, ns)
+    sql = (
+        "SELECT id, namespace, title, tags FROM entries WHERE "
+        + ' AND '.join(where) + " ORDER BY created_at DESC LIMIT ?"
+    )
+    params.append(limit)
+    return con.execute(sql, params).fetchall()
+
+
+def tool_memory_tag_strip(args: dict) -> dict:
+    """Remove a tag from active entries that have it. Defaults to dry_run=true."""
+    ns = (args or {}).get('namespace') or None
+    tag = (args or {}).get('tag', '')
+    dry_run = bool((args or {}).get('dry_run', True))
+    limit = max(1, min(int((args or {}).get('limit', 100) or 100), 1000))
+    if not tag:
+        return {'error': 'tag required', 'dry_run': dry_run}
+    con = sqlite3.connect(_memory_db_path())
+    con.row_factory = sqlite3.Row
+    matched = []
+    try:
+        rows = _find_entries_with_tag(con, ns, tag, limit)
+        for r in rows:
+            try:
+                entry_tags = json.loads(r['tags'] or '[]')
+            except Exception:
+                continue
+            if tag not in entry_tags:
+                continue
+            matched.append({
+                'id': r['id'],
+                'namespace': r['namespace'],
+                'title': r['title'] or '',
+                'new_tags': [t for t in entry_tags if t != tag],
+            })
+        if not dry_run and matched:
+            now = int(time.time())
+            for m in matched:
+                con.execute(
+                    "UPDATE entries SET tags=?, updated_at=? WHERE id=?",
+                    (json.dumps(m['new_tags'], ensure_ascii=False), now, m['id']),
+                )
+            con.commit()
+    finally:
+        con.close()
+    return {
+        'namespace': ns or 'all',
+        'tag': tag,
+        'dry_run': dry_run,
+        'matched': len(matched),
+        'stripped': 0 if dry_run else len(matched),
+        'ids': [m['id'] for m in matched],
+        'operator_summary': (
+            f'would strip "{tag}" from {len(matched)} entr(y/ies)'
+            if dry_run else f'stripped "{tag}" from {len(matched)} entr(y/ies)'
+        ),
+    }
+
+
+def tool_memory_tag_rename(args: dict) -> dict:
+    """Rename a tag (or merge into existing) across active entries. Defaults to dry_run=true."""
+    ns = (args or {}).get('namespace') or None
+    old_tag = (args or {}).get('old_tag', '')
+    new_tag = (args or {}).get('new_tag', '')
+    dry_run = bool((args or {}).get('dry_run', True))
+    limit = max(1, min(int((args or {}).get('limit', 100) or 100), 1000))
+    if not old_tag or not new_tag:
+        return {'error': 'old_tag and new_tag required', 'dry_run': dry_run}
+    if old_tag == new_tag:
+        return {'error': 'old_tag == new_tag, nothing to do', 'dry_run': dry_run}
+    con = sqlite3.connect(_memory_db_path())
+    con.row_factory = sqlite3.Row
+    matched = []
+    try:
+        rows = _find_entries_with_tag(con, ns, old_tag, limit)
+        for r in rows:
+            try:
+                entry_tags = json.loads(r['tags'] or '[]')
+            except Exception:
+                continue
+            if old_tag not in entry_tags:
+                continue
+            new_list = []
+            seen = set()
+            for t in entry_tags:
+                rep = new_tag if t == old_tag else t
+                if rep not in seen:
+                    new_list.append(rep)
+                    seen.add(rep)
+            matched.append({
+                'id': r['id'],
+                'namespace': r['namespace'],
+                'title': r['title'] or '',
+                'new_tags': new_list,
+            })
+        if not dry_run and matched:
+            now = int(time.time())
+            for m in matched:
+                con.execute(
+                    "UPDATE entries SET tags=?, updated_at=? WHERE id=?",
+                    (json.dumps(m['new_tags'], ensure_ascii=False), now, m['id']),
+                )
+            con.commit()
+    finally:
+        con.close()
+    return {
+        'namespace': ns or 'all',
+        'old_tag': old_tag,
+        'new_tag': new_tag,
+        'dry_run': dry_run,
+        'matched': len(matched),
+        'renamed': 0 if dry_run else len(matched),
+        'ids': [m['id'] for m in matched],
+        'operator_summary': (
+            f'would rename "{old_tag}" -> "{new_tag}" on {len(matched)} entr(y/ies)'
+            if dry_run else f'renamed "{old_tag}" -> "{new_tag}" on {len(matched)} entr(y/ies)'
+        ),
+    }
+
 
 # ---------------------------------------------------------------------------
 # memory_freshness
@@ -1185,13 +1413,106 @@ def tool_memory_hnsw_status(args: dict) -> dict:
     return hnsw_status()
 
 
+def _fastembed_jobs_dir() -> str:
+    path = r'C:\MirageWork\mcp-server\data\fastembed_jobs'
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _fastembed_job_path(job_id: str) -> str:
+    safe = ''.join(ch for ch in str(job_id) if ch.isalnum() or ch in ('-', '_'))[:64]
+    return os.path.join(_fastembed_jobs_dir(), f'{safe}.json')
+
+
+def _write_fastembed_job_snapshot(job_id: str, job: dict) -> None:
+    try:
+        payload = dict(job)
+        payload['job_id'] = job_id
+        path = _fastembed_job_path(job_id)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+        os.replace(tmp, path)
+    except Exception:
+        log.exception('failed to persist fastembed job snapshot')
+
+
+def _read_fastembed_job_snapshot(job_id: str) -> dict:
+    try:
+        with open(_fastembed_job_path(job_id), 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        return {'job_id': job_id, 'state': 'error', 'result': {'error': str(e)}}
+
+
 def tool_memory_fastembed_rebuild(args: dict) -> dict:
-    """Build fastembed index using true embedding model (BAAI/bge-small-en-v1.5, 384dim).
-    Requires C:\MirageWork\venv\memory-win\Scripts\python.exe with fastembed installed."""
+    """Start async fastembed rebuild (returns job_id; poll memory_fastembed_rebuild_status).
+    Pass sync=true to block until done (legacy behavior, will likely exceed MCP timeout for full index).
+    """
     import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
     from memory_store import fastembed_rebuild
     namespaces = (args or {}).get('namespaces', None)
-    return fastembed_rebuild(namespaces=namespaces)
+    sync = bool((args or {}).get('sync', False))
+    if sync:
+        return fastembed_rebuild(namespaces=namespaces)
+    job_id = str(uuid.uuid4())[:8]
+    with _jobs_lock:
+        _jobs[job_id] = {
+            'state': 'running', 'kind': 'fastembed_rebuild',
+            'namespaces': namespaces,
+            'started_at': time.time(), 'result': None,
+        }
+        _write_fastembed_job_snapshot(job_id, _jobs[job_id])
+
+    def _run():
+        started = time.time()
+        try:
+            result = fastembed_rebuild(namespaces=namespaces)
+            with _jobs_lock:
+                _jobs[job_id]['state'] = 'done'
+                _jobs[job_id]['result'] = result
+                _jobs[job_id]['duration_sec'] = round(time.time() - started, 2)
+                _jobs[job_id]['finished_at'] = time.time()
+                _write_fastembed_job_snapshot(job_id, _jobs[job_id])
+        except Exception as e:
+            with _jobs_lock:
+                _jobs[job_id]['state'] = 'error'
+                _jobs[job_id]['result'] = {'error': str(e)}
+                _jobs[job_id]['duration_sec'] = round(time.time() - started, 2)
+                _jobs[job_id]['finished_at'] = time.time()
+                _write_fastembed_job_snapshot(job_id, _jobs[job_id])
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {'job_id': job_id, 'state': 'running', 'kind': 'fastembed_rebuild',
+            'namespaces': namespaces,
+            'message': 'fastembed rebuild started; poll memory_fastembed_rebuild_status'}
+
+
+def tool_memory_fastembed_rebuild_status(args: dict) -> dict:
+    """Poll status of an async fastembed rebuild job. Pass job_id."""
+    job_id = (args or {}).get('job_id', '')
+    if not job_id:
+        return {'error': 'job_id required'}
+    with _jobs_lock:
+        job = dict(_jobs.get(job_id) or {})
+    if not job:
+        job = _read_fastembed_job_snapshot(job_id) or {}
+    if not job:
+        return {'job_id': job_id, 'state': 'not_found'}
+    elapsed = None
+    if job.get('started_at'):
+        end = job.get('finished_at') or time.time()
+        elapsed = round(end - job['started_at'], 2)
+    return {
+        'job_id': job_id,
+        'state': job.get('state', 'unknown'),
+        'kind': job.get('kind', 'fastembed_rebuild'),
+        'namespaces': job.get('namespaces'),
+        'elapsed_sec': elapsed,
+        'result': job.get('result'),
+    }
 
 
 def tool_memory_fastembed_search(args: dict) -> dict:
@@ -3564,12 +3885,21 @@ TOOLS = {
         'handler': tool_memory_decision_auto,
     },
     'memory_supersede': {
-        'description': 'Mark old entry as superseded by new one.',
+        'description': 'Mark old entry as superseded by new one. Accepts 8+ char id prefixes (auto-resolved).',
         'schema': {'type': 'object', 'properties': {
             'old_id': {'type': 'string'},
             'new_id': {'type': 'string'},
         }, 'required': ['old_id', 'new_id']},
         'handler': tool_memory_supersede,
+    },
+    'memory_supersede_many': {
+        'description': 'Bulk supersede. pairs=[{old_id,new_id},...] or olds=[...]+new_id (many-to-one). Prefixes auto-resolved.',
+        'schema': {'type': 'object', 'properties': {
+            'pairs': {'type': 'array', 'items': {'type': 'object'}},
+            'olds': {'type': 'array', 'items': {'type': 'string'}},
+            'new_id': {'type': 'string'},
+        }},
+        'handler': tool_memory_supersede_many,
     },
     'memory_get': {
         'description': 'Fetch full entry by ID or hex prefix. Returns ambiguity error with candidate list if prefix matches multiple entries.',
@@ -3607,6 +3937,27 @@ TOOLS = {
             'dry_run': {'type': 'boolean'},
         }},
         'handler': tool_memory_archive_by_query,
+    },
+    'memory_tag_strip': {
+        'description': 'Remove a tag from active entries that have it. Defaults to dry_run=true.',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'tag': {'type': 'string'},
+            'limit': {'type': 'integer'},
+            'dry_run': {'type': 'boolean'},
+        }, 'required': ['tag']},
+        'handler': tool_memory_tag_strip,
+    },
+    'memory_tag_rename': {
+        'description': 'Rename a tag across active entries (merges if new_tag already present). Defaults to dry_run=true.',
+        'schema': {'type': 'object', 'properties': {
+            'namespace': {'type': 'string'},
+            'old_tag': {'type': 'string'},
+            'new_tag': {'type': 'string'},
+            'limit': {'type': 'integer'},
+            'dry_run': {'type': 'boolean'},
+        }, 'required': ['old_tag', 'new_tag']},
+        'handler': tool_memory_tag_rename,
     },
     'memory_freshness': {
         'description': 'Check bootstrap freshness for all namespaces.',
@@ -3665,11 +4016,19 @@ TOOLS = {
         'schema': {'type': 'object', 'properties': {}, 'required': []},
     },
     'memory_fastembed_rebuild': {
-        'description': 'Build fastembed true embedding index (BAAI/bge-small-en-v1.5, 384dim). Requires memory-win venv.',
+        'description': 'Start async fastembed rebuild (returns job_id). Pass sync=true for legacy blocking call (likely exceeds MCP timeout).',
         'handler': tool_memory_fastembed_rebuild,
         'schema': {'type': 'object', 'properties': {
             'namespaces': {'type': 'array', 'description': 'Limit to specific namespaces (default: all)'},
+            'sync': {'type': 'boolean', 'description': 'Block until done (default false: returns job_id immediately)'},
         }, 'required': []},
+    },
+    'memory_fastembed_rebuild_status': {
+        'description': 'Poll status of an async fastembed rebuild job started by memory_fastembed_rebuild.',
+        'handler': tool_memory_fastembed_rebuild_status,
+        'schema': {'type': 'object', 'properties': {
+            'job_id': {'type': 'string'},
+        }, 'required': ['job_id']},
     },
     'memory_fastembed_search': {
         'description': 'Search memory using true fastembed embeddings. Returns epistemic_status=semantic_match.',
