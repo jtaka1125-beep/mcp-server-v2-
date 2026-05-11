@@ -135,27 +135,34 @@ def _call_groq(model: str, prompt: str, max_tokens: int, timeout: int) -> str:
 
 def _call_gemini(prompt: str, max_tokens: int, timeout: int,
                  image_b64: str = None) -> str:
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        raise RuntimeError('google-generativeai not installed')
+    """Call Gemini 2.0 Flash via direct REST API (no SDK).
+
+    History (2026-05-11): the previous SDK-based implementation imported
+    google.generativeai at call time, which on this machine hung for 90+
+    seconds before either succeeding or failing. That long hang is the
+    "Gemini silent broken" symptom recorded across multiple memory entries
+    -- vision callers timed out before ever reaching groq fallback.
+
+    REST API direct (gemini_router.py uses the same pattern):
+      - No SDK install/import dependency
+      - No mysterious init hang
+      - Same 429 / quota semantics (handled by caller)
+    """
+    import urllib.request, urllib.error, json as _json
     key = _get_env('GEMINI_API_KEY')
     if not key:
         raise RuntimeError('GEMINI_API_KEY not set')
-    genai.configure(api_key=key)
-    model = genai.GenerativeModel(
-        model_name='gemini-2.0-flash',
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.1, max_output_tokens=max_tokens)
-    )
+
+    model_name = 'gemini-2.0-flash'
+    url = (f'https://generativelanguage.googleapis.com/v1beta/models/'
+           f'{model_name}:generateContent?key={key}')
+
     parts = []
     if image_b64:
         import base64
         raw = base64.b64decode(image_b64)
-        # Detect MIME from magic bytes; mismatched mime causes Gemini to silently
-        # drop the image (observed 2026-05-11: declared image/jpeg + PNG payload
-        # -> "IMAGE_NOT_VISIBLE" responses). PNG starts with '\x89PNG', JPEG with
-        # '\xff\xd8\xff', WEBP is 'RIFF....WEBP'.
+        # MIME detection from magic bytes (mismatched MIME causes silent
+        # IMAGE_NOT_VISIBLE responses; observed 2026-05-11).
         if raw[:4] == b'\x89PNG':
             mime = 'image/png'
         elif raw[:3] == b'\xff\xd8\xff':
@@ -163,14 +170,49 @@ def _call_gemini(prompt: str, max_tokens: int, timeout: int,
         elif raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
             mime = 'image/webp'
         else:
-            mime = 'image/jpeg'  # fallback
-        parts.append({'mime_type': mime, 'data': raw})
-    parts.append(prompt)
-    resp = model.generate_content(parts,
-                                  request_options={'timeout': timeout})
-    _log_usage('gemini', 'gemini-2.0-flash',
-               len(prompt) // 4, len(resp.text) // 4, True)
-    return resp.text.strip()
+            mime = 'image/jpeg'
+        parts.append({'inline_data': {'mime_type': mime, 'data': image_b64}})
+    parts.append({'text': prompt})
+
+    body = {
+        'contents': [{'parts': parts}],
+        'generationConfig': {
+            'temperature': 0.1,
+            'maxOutputTokens': max_tokens,
+        },
+    }
+    req = urllib.request.Request(
+        url,
+        data=_json.dumps(body).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            rj = _json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        # Surface quota-shaped errors so caller fallback chain can route
+        # to groq/cerebras quickly (matches old SDK behavior shape).
+        body_text = ''
+        try:
+            body_text = e.read().decode('utf-8', errors='replace')[:200]
+        except Exception:
+            pass
+        raise RuntimeError(f'gemini REST HTTP {e.code}: {e.reason}: {body_text}')
+    except urllib.error.URLError as e:
+        raise RuntimeError(f'gemini REST URL error: {e}')
+
+    try:
+        text = rj['candidates'][0]['content']['parts'][0]['text']
+    except (KeyError, IndexError, TypeError):
+        # Empty / blocked response (e.g. safety filter).
+        finish = (rj.get('candidates') or [{}])[0].get('finishReason')
+        raise RuntimeError(f'gemini REST empty response (finish={finish}): '
+                           f'{_json.dumps(rj)[:200]}')
+
+    _log_usage('gemini', model_name,
+               len(prompt) // 4, len(text) // 4, True)
+    return text.strip()
 
 
 def _call_claude_cli(prompt: str, timeout: int, model: str = 'haiku') -> str:
