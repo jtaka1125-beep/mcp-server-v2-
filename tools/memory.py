@@ -3031,7 +3031,18 @@ def tool_memory_semantic_lite_status(args: dict) -> dict:
 
 
 def tool_memory_semantic_backend_status(args: dict) -> dict:
-    """Report available semantic backends and install state."""
+    """Report available semantic backends and install state.
+
+    Note (2026-05-11): the original check only looked for in-process
+    `import fastembed` and `import hnswlib`. The actual operational mode on
+    this machine is `usearch` (different package than hnswlib) + a subprocess
+    that runs fastembed in a memory-win venv. That combination produces real
+    true-embedding searches (verified score 0.71-0.74) but the legacy check
+    reports "not installed" because the names it looks for never appear in
+    the V2 main process. operational_* fields below describe the path that
+    actually runs.
+    """
+    import os as _os
     backends = []
     try:
         import numpy as _np
@@ -3060,29 +3071,76 @@ def tool_memory_semantic_backend_status(args: dict) -> dict:
         hnswlib_error = str(e)
     else:
         hnswlib_error = ''
+
+    # Operational reality checks (the path searches actually take):
+    try:
+        import usearch as _usearch
+        usearch_ok = True
+        usearch_version = getattr(_usearch, '__version__', '')
+    except Exception:
+        usearch_ok = False
+        usearch_version = ''
+    try:
+        from memory_store import _fastembed_available, _FASTEMBED_INDEX_PATH, _HNSW_INDEX_PATH
+        fastembed_subprocess_ok = _fastembed_available()
+        fastembed_index_exists = _os.path.exists(_FASTEMBED_INDEX_PATH)
+        hnsw_index_exists = _os.path.exists(_HNSW_INDEX_PATH)
+    except Exception:
+        fastembed_subprocess_ok = False
+        fastembed_index_exists = False
+        hnsw_index_exists = False
+
+    operational_ready = (
+        usearch_ok and fastembed_subprocess_ok
+        and fastembed_index_exists and hnsw_index_exists
+    )
+    if operational_ready:
+        operational_backend = 'usearch_hnsw + fastembed_subprocess'
+        operational_summary = 'true-embedding search operational via usearch + subprocess'
+    elif numpy_ok:
+        operational_backend = 'semantic_lite_hashed_ngrams'
+        operational_summary = 'semantic_lite fallback (no true embedding path ready)'
+    else:
+        operational_backend = 'fts_only'
+        operational_summary = 'FTS only (no semantic backend available)'
+
     current = 'semantic_lite_hashed_ngrams' if numpy_ok else 'fts_only'
     target_ready = fastembed_ok and hnswlib_ok
     return {
         'operator_summary': (
-            'fastembed+hnsw ready' if target_ready
-            else 'using semantic_lite; fastembed/hnsw backend not installed'
+            f'{operational_summary}; legacy target_ready={target_ready}'
         ),
-        'current_backend': current,
+        'current_backend': current,  # legacy in-process import check
+        'operational_backend': operational_backend,  # what searches actually use
+        'operational_ready': operational_ready,
         'target_backend': 'fastembed_hnsw',
         'target_ready': target_ready,
-        'epistemic_status': 'limited_semantic' if current == 'semantic_lite_hashed_ngrams' else 'lexical_only',
-        'current_backend_trust': 'candidate_only',
+        'epistemic_status': 'true_embedding' if operational_ready
+                            else 'limited_semantic' if current == 'semantic_lite_hashed_ngrams'
+                            else 'lexical_only',
+        'current_backend_trust': 'true_embedding' if operational_ready else 'candidate_only',
         'known_limitations': [
             'semantic_lite_hashed_ngrams is token/ngram cosine, not a true embedding model',
             'cross_namespace_hints and related_hints remain candidates until source content is inspected',
-            'fastembed_hnsw is not active until both fastembed and hnswlib are available in the V2 runtime',
+            ('legacy "fastembed_hnsw" target check looks for in-process imports of '
+             'fastembed and hnswlib; this machine uses usearch + subprocess instead, '
+             'so target_ready stays False even when true-embedding search is fully '
+             'operational. See operational_ready for the actual state.'),
         ],
         'backends': [
             {'name': 'fts', 'available': True},
             {'name': 'semantic_lite_hashed_ngrams', 'available': numpy_ok, 'numpy_version': numpy_version},
             {'name': 'fastembed', 'available': fastembed_ok, 'version': fastembed_version, 'error': fastembed_error},
             {'name': 'hnswlib', 'available': hnswlib_ok, 'version': hnswlib_version, 'error': hnswlib_error},
+            {'name': 'usearch', 'available': usearch_ok, 'version': usearch_version},
+            {'name': 'fastembed_subprocess', 'available': fastembed_subprocess_ok},
         ],
+        'operational_details': {
+            'usearch_ok': usearch_ok,
+            'fastembed_subprocess_ok': fastembed_subprocess_ok,
+            'fastembed_index_exists': fastembed_index_exists,
+            'hnsw_index_exists': hnsw_index_exists,
+        },
         'next_action': (
             'implement fastembed_hnsw index/search'
             if target_ready else 'install fastembed and hnswlib in the V2 runtime before backend swap'
