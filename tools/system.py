@@ -138,6 +138,13 @@ def tool_write_file_b64(args: dict) -> dict:
 def tool_list_files(args: dict) -> dict:
     path    = (args or {}).get('path', MIRAGE_DIR)
     pattern = (args or {}).get('pattern', '*')
+    # Validate path against traversal; pattern may legitimately include '*' etc.,
+    # but not '..' segments.
+    ok, msg = _validate_path(path)
+    if not ok:
+        return {'error': msg}
+    if '..' in pattern.replace('\\', '/').split('/'):
+        return {'error': f'pattern traversal denied: {pattern!r}'}
     try:
         full_pattern = os.path.join(path, pattern)
         files = glob.glob(full_pattern, recursive=False)

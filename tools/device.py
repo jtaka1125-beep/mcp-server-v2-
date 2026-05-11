@@ -71,6 +71,12 @@ def tool_screenshot(args: dict) -> dict:
         serial_safe = (device or 'default').replace(':', '_').replace('.', '_')
         save_path = rf'C:\MirageWork\MirageVulkan\screenshots\ss_{serial_safe}_{ts}.png'
 
+    # Validate save_path against traversal so a user-supplied path can't escape
+    # into arbitrary locations (mirror system.py:_validate_path).
+    raw_parts = save_path.replace('\\', '/').split('/')
+    if '..' in raw_parts:
+        return {'error': f'save_path traversal denied (.. segment): {save_path!r}'}
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     # ADB screencap
