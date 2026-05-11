@@ -81,6 +81,13 @@ def _build_prompt_v3(text: str, namespace: str, max_chars: int,
     "MCPサーバーの信頼性改善" のような並列名は「外部記憶基盤 (fastembed/link_health 等) の信頼性強化」のように 1 行に統合
   - 5-8 件以内に収まらない場合は、より上位の概念で括る
   - 前回要約に重複が残っていても、本回出力では統合し直す
+- **「主要設計判断」と「既知問題 / 残課題」は相互排他**:
+  - 完了済み・現役で機能している → 主要設計判断のみ
+  - 未解決・継続課題・改善余地あり → 既知問題のみ
+  - 同じトピックが両方に該当しそうなら、状態で振り分ける:
+    - 「整備完了 + 一部改善余地」→ 主要設計判断 (改善点はコメントで併記しない、別行が必要なら既知問題側に具体的な未完項目だけ書く)
+    - 「整備中 / テンプレート不足」→ 既知問題のみ
+  - 同名項目が両セクションに居る要約は必ずどちらか一方に集約してから出力
 {prev_section}
 
 ## 開発ログ (新→古、{len(text)} 文字)
@@ -92,8 +99,63 @@ def _build_prompt_v3(text: str, namespace: str, max_chars: int,
 # ---------------------------------------------------------------------------
 # 後処理 v3
 # ---------------------------------------------------------------------------
+def _dedupe_cross_section(raw: str) -> str:
+    """主要設計判断 と 既知問題 / 残課題 が同名項目を両方持つのを post-process で除去。
+    LLM (qwen) が prev_summary の重複を踏襲して両セクションに同じ行を残してしまうため、
+    programmatic に保証する。重複時は 既知問題側を削除 (主要設計判断 = 現役、を優先)。
+    """
+    lines = raw.splitlines()
+    SEC_DESIGN = '主要設計判断'
+    SEC_ISSUES = '既知問題'
+
+    def _line_key(line: str) -> str:
+        # 先頭の "-" "  -" "・" "  " を剥がして本文だけ取り出し、空白圧縮
+        s = line.lstrip()
+        for prefix in ('- ', '・', '* '):
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+                break
+        return ''.join(s.split())
+
+    # セクション境界を ■ で検出
+    sec_idx = []  # [(line_idx, section_name)]
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('■'):
+            sec_idx.append((i, line))
+
+    # 主要設計判断 の中身行を集める
+    design_items = set()
+    for j, (start, header) in enumerate(sec_idx):
+        if SEC_DESIGN not in header:
+            continue
+        end = sec_idx[j + 1][0] if j + 1 < len(sec_idx) else len(lines)
+        for k in range(start + 1, end):
+            body = lines[k].strip()
+            if body and not body.startswith('■') and not body.startswith('##'):
+                design_items.add(_line_key(lines[k]))
+
+    # 既知問題 セクションで design_items と一致する行を削除
+    out = list(lines)
+    removed = 0
+    for j, (start, header) in enumerate(sec_idx):
+        if SEC_ISSUES not in header:
+            continue
+        end = sec_idx[j + 1][0] if j + 1 < len(sec_idx) else len(lines)
+        for k in range(start + 1, end):
+            body = lines[k].strip()
+            if not body or body.startswith('■') or body.startswith('##'):
+                continue
+            if _line_key(lines[k]) in design_items:
+                out[k] = None  # mark for removal
+                removed += 1
+
+    return '\n'.join(l for l in out if l is not None)
+
+
 def _normalize_v3(raw: str, max_chars: int) -> str:
     """v3 normalize: ■ で始まる構造を保持、見出し以外の行は許容。"""
+    # Post-process: cross-section dedup (主要設計判断 vs 既知問題)
+    raw = _dedupe_cross_section(raw)
     lines = raw.strip().splitlines()
 
     # ■ で始まる行が 1 つもなければ failure
