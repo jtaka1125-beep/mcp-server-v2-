@@ -74,7 +74,8 @@ def tool_run_mirage_gui(args: dict) -> dict:
         return {
             'status': 'launched' if ok else 'failed',
             'rc': r.returncode,
-            'out': r.stdout.strip(),
+            'out': (r.stdout or '').strip(),
+            'err': (r.stderr or '').strip(),
         }
     except Exception as e:
         return {'status': 'error', 'error': str(e)}
