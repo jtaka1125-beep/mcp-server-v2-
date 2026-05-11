@@ -92,7 +92,6 @@ if os.environ.get('V2_USE_DISPATCHER', '').strip() == '1':
 else:
     import tools.task     as task_tools;     TOOLS.update(task_tools.TOOLS)
     import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
-import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
 import tools.windows_ops as winops_tools; TOOLS.update(winops_tools.TOOLS)
 import tools.ai       as ai_tools;        TOOLS.update(ai_tools.TOOLS)
