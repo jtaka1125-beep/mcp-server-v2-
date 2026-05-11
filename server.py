@@ -92,12 +92,88 @@ if os.environ.get('V2_USE_DISPATCHER', '').strip() == '1':
 else:
     import tools.task     as task_tools;     TOOLS.update(task_tools.TOOLS)
     import tools.loop     as loop_tools;     TOOLS.update(loop_tools.TOOLS)
+import tools.pipeline as pipeline_tools; TOOLS.update(pipeline_tools.TOOLS)  # no-op stubs (a4a530a successor)
 import tools.vision   as vision_tools;   TOOLS.update(vision_tools.TOOLS)
 import tools.windows_ops as winops_tools; TOOLS.update(winops_tools.TOOLS)
 import tools.ai       as ai_tools;        TOOLS.update(ai_tools.TOOLS)
 import tools.step6    as step6_tools;     TOOLS.update(step6_tools.TOOLS)
 
 log.info(f'Registered tools: {list(TOOLS.keys())}')
+
+
+# ---------------------------------------------------------------------------
+# Idempotency + chunk upload state (for /api/v1/memory GET write endpoints)
+# ---------------------------------------------------------------------------
+# Idempotency: persistent table in memory.db, INSERT-time lazy cleanup of >24h.
+# Chunk upload: volatile in-process dict, 60-min TTL, cleared on restart.
+_IDEM_TTL_SEC   = 24 * 3600
+_CHUNK_TTL_SEC  = 60 * 60
+_CHUNK_MAX_DATA = 32 * 1024          # base64-decoded bytes per chunk
+_CHUNK_MAX_TOTAL = 1024 * 1024       # base64-decoded bytes per txn total
+_CONTENT_MAX = 64 * 1024              # bytes per content field on single-shot append
+_CHUNK_STATE: dict = {}              # txn_id -> {'created_at', 'ns', 'type', 'imp', 'summary', 'parts': {seq: b64str}}
+_CHUNK_LOCK = threading.Lock()
+
+def _idem_db_init():
+    """Ensure idempotency_keys table exists. Safe to call multiple times."""
+    try:
+        import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+        from memory_store import _connect
+        con = _connect()
+        try:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS idempotency_keys ("
+                "idem TEXT PRIMARY KEY, entry_id TEXT NOT NULL, created_at INTEGER NOT NULL)"
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        log.warning(f'idempotency table init skipped: {e}')
+
+def _idem_lookup(idem: str):
+    """Return existing entry_id for a non-expired idem, or None."""
+    if not idem:
+        return None
+    try:
+        import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+        from memory_store import _connect
+        con = _connect()
+        try:
+            row = con.execute(
+                "SELECT entry_id FROM idempotency_keys WHERE idem=? "
+                "AND created_at >= strftime('%s','now') - ?",
+                (idem, _IDEM_TTL_SEC)
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            con.close()
+    except Exception as e:
+        log.warning(f'idem_lookup failed: {e}')
+        return None
+
+def _idem_record(idem: str, entry_id: str):
+    """Record idem→entry_id, lazy-deleting >24h expired rows in same call."""
+    if not idem or not entry_id:
+        return
+    try:
+        import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+        from memory_store import _connect
+        con = _connect()
+        try:
+            con.execute("DELETE FROM idempotency_keys WHERE created_at < strftime('%s','now') - ?", (_IDEM_TTL_SEC,))
+            con.execute(
+                "INSERT OR IGNORE INTO idempotency_keys (idem, entry_id, created_at) "
+                "VALUES (?, ?, strftime('%s','now'))",
+                (idem, entry_id)
+            )
+            con.commit()
+        finally:
+            con.close()
+    except Exception as e:
+        log.warning(f'idem_record failed: {e}')
+
+_idem_db_init()
 
 
 def _file_age_sec(path: str):
@@ -254,6 +330,11 @@ class MCPHandler(BaseHTTPRequestHandler):
         Disabled when MIRAGE_MCP_TOKEN env is unset. /health and /restart are
         exempt so loopback callers (V1 health-check, mcp_guard_v2 restart
         trigger) keep working.
+
+        Accepts api_key=<token> query param as a fallback for clients that
+        cannot set Authorization header (e.g. claude.ai web_fetch). Query-
+        string credentials may be logged by upstream CDN/proxy; treat the
+        token as comparable risk to a URL secret.
         """
         token = os.environ.get('MIRAGE_MCP_TOKEN', '')
         if not token:
@@ -263,9 +344,15 @@ class MCPHandler(BaseHTTPRequestHandler):
         if path in ('/', '/health', '/health/deep', '/health/report', '/restart'):
             return True
         auth = self.headers.get('Authorization', '')
-        if not auth.startswith('Bearer '):
+        if auth.startswith('Bearer ') and auth[len('Bearer '):].strip() == token:
+            return True
+        # Query-param fallback for browser-side fetch clients
+        try:
+            import urllib.parse as _up
+            qs = _up.parse_qs(_up.urlparse(self.path or '').query)
+            return qs.get('api_key', [''])[0] == token
+        except Exception:
             return False
-        return auth[len('Bearer '):].strip() == token
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -303,6 +390,232 @@ class MCPHandler(BaseHTTPRequestHandler):
 
 
 
+    def _build_context_response(self, qs: dict) -> dict:
+        """Build /api/v1/context v2.1 response.
+
+        Additive over the original 3-key shape (name/status/port preserved
+        verbatim). Adds URL templates so browser-side AI clients can call
+        memory APIs by URL alone without setting Bearer headers.
+        """
+        import datetime as _dt
+        import shutil as _shutil
+        # Caller-supplied api_key roundtripped into template URLs so the
+        # caller can use the returned URLs directly. If absent we leave
+        # literal <KEY> for manual substitution.
+        caller_key = qs.get('api_key', ['<KEY>'])[0] or '<KEY>'
+        ns = qs.get('namespace', [''])[0] or None
+        BASE = 'https://mcp.mirage-sys.com/api/v1'
+
+        def _tpl(path_with_qs: str) -> str:
+            return f'{BASE}/{path_with_qs}&api_key={caller_key}'
+
+        out = {
+            # --- existing keys preserved verbatim (additive guarantee) ---
+            'name': 'mirage-mcp-v2',
+            'status': 'ok',
+            'port': PORT_NEW,
+            # --- v2.1 additions ---
+            'version': '2.1.0',
+            'namespace': ns,
+            'timestamp': _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            'apis': {
+                'memory': {
+                    'append_decision_template': _tpl('memory/append_decision?namespace={ns}&importance={imp}&summary={s}&content={c}&idem={idem}'),
+                    'append_raw_template':      _tpl('memory/append_raw?namespace={ns}&content={c}&idem={idem}'),
+                    'search_template':          _tpl('memory/search?namespace={ns}&q={q}'),
+                    'get_template':             _tpl('memory/get?id={id}'),
+                    'compact_template':         _tpl('memory/compact?namespace={ns}&model=llama3.2:3b&max_chars=800'),
+                    'chunk_begin_template':     _tpl('memory/chunk/begin?ns={ns}&type={type}&imp={imp}&summary={s}'),
+                    'chunk_append_template':    _tpl('memory/chunk/append?txn={txn}&seq={seq}&data={base64}'),
+                    'chunk_commit_template':    _tpl('memory/chunk/commit?txn={txn}'),
+                },
+                'files': {
+                    'read_template': _tpl('read?path={path}'),
+                    'list_template': _tpl('list?path={path}'),
+                },
+                'exec': {
+                    'command_template': _tpl('exec?cmd={cmd}'),
+                },
+            },
+            'bootstrap_urls': [
+                _tpl(f'memory/bootstrap?namespace={n}') for n in
+                ('mirage-vulkan', 'mirage-android', 'mirage-infra', 'mirage-design', 'mirage-general')
+            ],
+            'url_queue': [],
+            'namespaces_available': ['mirage-vulkan', 'mirage-android', 'mirage-infra', 'mirage-design', 'mirage-general'],
+        }
+
+        # recent_activity (best effort; never block the response)
+        recent = {'last_decision_ts': None, 'decisions_today': 0, 'active_pipelines': []}
+        try:
+            import sys as _sys; _sys.path.insert(0, r'C:\MirageWork\mirage-shared')
+            from memory_store import _connect as _mc
+            _con = _mc()
+            try:
+                row = _con.execute(
+                    "SELECT MAX(created_at) FROM entries WHERE type='decision'"
+                ).fetchone()
+                if row and row[0]:
+                    recent['last_decision_ts'] = _dt.datetime.fromtimestamp(int(row[0]), _dt.timezone.utc).isoformat()
+                row2 = _con.execute(
+                    "SELECT COUNT(*) FROM entries WHERE type='decision' "
+                    "AND created_at >= strftime('%s','now','start of day')"
+                ).fetchone()
+                recent['decisions_today'] = int(row2[0]) if row2 else 0
+            finally:
+                _con.close()
+        except Exception:
+            pass
+        out['recent_activity'] = recent
+
+        # system_health (best effort)
+        health = {'memory_db_size_mb': 0.0, 'fastembed_status': 'unknown', 'disk_free_gb': 0.0}
+        try:
+            db_path = r'C:\MirageWork\mcp-server\data\memory.db'
+            if os.path.exists(db_path):
+                health['memory_db_size_mb'] = round(os.path.getsize(db_path) / (1024 * 1024), 2)
+        except Exception:
+            pass
+        try:
+            health['disk_free_gb'] = round(_shutil.disk_usage('C:\\').free / (1024 ** 3), 2)
+        except Exception:
+            pass
+        # Fast non-blocking check: existence + mtime of the fastembed npz
+        # (avoid cold-import probe which can hang 30-90s+ under commit pressure;
+        # see decision 22254fc7 for the 2917s empirical measurement)
+        try:
+            fe_npz = r'C:\MirageWork\mcp-server\data\memory_fastembed.npz'
+            if not os.path.exists(fe_npz):
+                health['fastembed_status'] = 'unavailable'
+            else:
+                age_hr = (time.time() - os.path.getmtime(fe_npz)) / 3600.0
+                health['fastembed_status'] = 'degraded' if age_hr > 48 else 'ok'
+        except Exception:
+            health['fastembed_status'] = 'unknown'
+        out['system_health'] = health
+
+        return out
+
+    def _handle_chunk(self, sub: str, qs: dict, ns: str):
+        """Chunk upload for content > 64KB. Volatile, 60min TTL."""
+        import base64 as _b64
+        import uuid as _uuid
+        import datetime as _dt3
+        _NS_OK = ('mirage-vulkan', 'mirage-android', 'mirage-infra', 'mirage-design', 'mirage-general')
+
+        if sub == 'begin':
+            # chunk APIs use `ns` (short form per spec); fall back to `namespace`
+            ns = qs.get('ns', [None])[0] or qs.get('namespace', [ns])[0] or ns
+            if ns not in _NS_OK:
+                self._send_json(400, {'error': f'unknown namespace: {ns}'})
+                return
+            etype = qs.get('type', ['decision'])[0]
+            if etype not in ('decision', 'raw'):
+                self._send_json(400, {'error': 'type must be decision or raw'})
+                return
+            try:
+                imp_val = int(qs.get('imp', ['3'])[0])
+            except (ValueError, TypeError):
+                imp_val = 3
+            txn = _uuid.uuid4().hex
+            with _CHUNK_LOCK:
+                # Lazy expire stale txns
+                _now = time.time()
+                for k in list(_CHUNK_STATE.keys()):
+                    if _now - _CHUNK_STATE[k]['created_at'] > _CHUNK_TTL_SEC:
+                        _CHUNK_STATE.pop(k, None)
+                _CHUNK_STATE[txn] = {
+                    'created_at': _now, 'ns': ns, 'type': etype, 'imp': imp_val,
+                    'summary': qs.get('summary', [''])[0], 'parts': {},
+                    'total_bytes': 0,
+                }
+            self._send_json(200, {'ok': True, 'txn': txn, 'ttl_sec': _CHUNK_TTL_SEC})
+            return
+
+        if sub in ('append', 'commit'):
+            txn = qs.get('txn', [''])[0]
+            if not txn:
+                self._send_json(400, {'error': 'txn required'})
+                return
+            with _CHUNK_LOCK:
+                state = _CHUNK_STATE.get(txn)
+                if not state:
+                    self._send_json(404, {'error': 'unknown txn (may have expired)'})
+                    return
+                if time.time() - state['created_at'] > _CHUNK_TTL_SEC:
+                    _CHUNK_STATE.pop(txn, None)
+                    self._send_json(410, {'error': 'txn expired'})
+                    return
+
+            if sub == 'append':
+                try:
+                    seq = int(qs.get('seq', ['-1'])[0])
+                except (ValueError, TypeError):
+                    seq = -1
+                if seq < 0:
+                    self._send_json(400, {'error': 'seq required (non-negative integer)'})
+                    return
+                data_b64 = qs.get('data', [''])[0]
+                if not data_b64:
+                    self._send_json(400, {'error': 'data (base64) required'})
+                    return
+                try:
+                    decoded = _b64.b64decode(data_b64, validate=True)
+                except Exception:
+                    self._send_json(400, {'error': 'data is not valid base64'})
+                    return
+                if len(decoded) > _CHUNK_MAX_DATA:
+                    self._send_json(413, {'error': f'chunk exceeds {_CHUNK_MAX_DATA // 1024}KB per part'})
+                    return
+                with _CHUNK_LOCK:
+                    state = _CHUNK_STATE.get(txn)
+                    if not state:
+                        self._send_json(404, {'error': 'unknown txn'})
+                        return
+                    if state['total_bytes'] + len(decoded) > _CHUNK_MAX_TOTAL:
+                        self._send_json(413, {'error': f'txn total exceeds {_CHUNK_MAX_TOTAL // 1024}KB'})
+                        return
+                    state['parts'][seq] = data_b64
+                    state['total_bytes'] += len(decoded)
+                self._send_json(200, {'ok': True, 'txn': txn, 'seq': seq, 'total_bytes': state['total_bytes']})
+                return
+
+            if sub == 'commit':
+                with _CHUNK_LOCK:
+                    state = _CHUNK_STATE.pop(txn, None)
+                if not state:
+                    self._send_json(404, {'error': 'unknown txn'})
+                    return
+                # Reassemble in seq order, decode, concat
+                try:
+                    parts_sorted = sorted(state['parts'].items(), key=lambda kv: kv[0])
+                    full = b''.join(_b64.b64decode(p[1]) for p in parts_sorted).decode('utf-8', errors='replace')
+                except Exception as e:
+                    self._send_json(500, {'error': f'reassembly failed: {e}'})
+                    return
+                # Dispatch to internal tool
+                import tools.memory as mem_tools
+                tool_name = 'memory_append_' + state['type']
+                args = {'namespace': state['ns'], 'content': full}
+                if state['type'] == 'decision':
+                    args['title'] = state['summary']
+                    args['importance'] = state['imp']
+                result = mem_tools.TOOLS[tool_name]['handler'](args)
+                entry_id = (result or {}).get('id') if isinstance(result, dict) else None
+                self._send_json(200, {
+                    'ok': bool(entry_id),
+                    'entry_id': entry_id,
+                    'namespace': state['ns'],
+                    'importance': state['imp'] if state['type'] == 'decision' else None,
+                    'ts': _dt3.datetime.now(_dt3.timezone.utc).isoformat(),
+                    'parts_count': len(state['parts']),
+                    'total_bytes': state['total_bytes'],
+                    'warnings': (result or {}).get('warnings', []) if isinstance(result, dict) else []
+                })
+                return
+
+        self._send_json(404, {'error': f'unknown chunk action: {sub}'})
+
     def _handle_api_route(self, path: str):
         """Handle /api/v1/* REST endpoints"""
         import urllib.parse
@@ -321,7 +634,10 @@ class MCPHandler(BaseHTTPRequestHandler):
         try:
             if section == 'memory':
                 import tools.memory as mem_tools
-                from memory import store as mem_store
+                # Sub-path support for /api/v1/memory/{action}/{sub} (chunk APIs)
+                sub = seg[4] if len(seg) > 4 else ''
+                _NS_OK = ('mirage-vulkan', 'mirage-android', 'mirage-infra', 'mirage-design', 'mirage-general')
+
                 if action == 'bootstrap':
                     args = {'namespace': ns}
                     if 'max_chars' in qs:
@@ -333,11 +649,66 @@ class MCPHandler(BaseHTTPRequestHandler):
                     result = mem_tools.TOOLS['memory_bootstrap']['handler'](args)
                     self._send_json(200, result)
                 elif action == 'search':
-                    q = qs.get('q', [''])[0]
+                    q = qs.get('q', [''])[0] or qs.get('query', [''])[0]
                     result = mem_tools.TOOLS['memory_search']['handler']({'namespace': ns, 'query': q})
                     self._send_json(200, result)
-                elif action == 'append_raw':
-                    self._send_json(405, {'error': 'use POST'})
+                elif action == 'get':
+                    id_val = qs.get('id', [''])[0]
+                    if not id_val:
+                        self._send_json(400, {'error': 'id required'})
+                    else:
+                        result = mem_tools.TOOLS['memory_get']['handler']({'id': id_val})
+                        self._send_json(200, result)
+                elif action in ('append_decision', 'append_raw'):
+                    # Phase 1-4: namespace validation
+                    if ns not in _NS_OK:
+                        self._send_json(400, {'error': f'unknown namespace: {ns}', 'allowed': list(_NS_OK)})
+                        return
+                    content = qs.get('content', [''])[0]
+                    if not content:
+                        self._send_json(400, {'error': 'content required'})
+                        return
+                    # Phase 1-4: 64KB content limit (single-shot path)
+                    if len(content.encode('utf-8')) > _CONTENT_MAX:
+                        self._send_json(413, {
+                            'error': f'content exceeds {_CONTENT_MAX // 1024}KB single-shot limit',
+                            'hint': 'use chunk APIs (memory/chunk/begin → append → commit)'
+                        })
+                        return
+                    # Phase 1-3: idempotency check
+                    idem = qs.get('idem', [''])[0] or None
+                    if idem:
+                        existing = _idem_lookup(idem)
+                        if existing:
+                            self._send_json(200, {
+                                'ok': True, 'entry_id': existing, 'namespace': ns,
+                                'idempotent_replay': True, 'warnings': []
+                            })
+                            return
+                    # Build args + dispatch
+                    args = {'namespace': ns, 'content': content}
+                    try:
+                        imp_val = int(qs.get('importance', ['3'])[0])
+                    except (ValueError, TypeError):
+                        imp_val = 3
+                    if action == 'append_decision':
+                        args['title']      = qs.get('summary', [''])[0] or qs.get('title', [''])[0]
+                        args['importance'] = imp_val
+                    result = mem_tools.TOOLS['memory_' + action]['handler'](args)
+                    entry_id = (result or {}).get('id') if isinstance(result, dict) else None
+                    if idem and entry_id:
+                        _idem_record(idem, entry_id)
+                    import datetime as _dt2
+                    self._send_json(200, {
+                        'ok': bool(entry_id),
+                        'entry_id': entry_id,
+                        'namespace': ns,
+                        'importance': imp_val if action == 'append_decision' else None,
+                        'ts': _dt2.datetime.now(_dt2.timezone.utc).isoformat(),
+                        'warnings': (result or {}).get('warnings', []) if isinstance(result, dict) else []
+                    })
+                elif action == 'chunk':
+                    self._handle_chunk(sub, qs, ns)
                 else:
                     self._send_json(404, {'error': f'unknown memory action: {action}'})
             elif section == 'status':
@@ -345,7 +716,7 @@ class MCPHandler(BaseHTTPRequestHandler):
                 result = sys_tools.TOOLS['status']['handler']({})
                 self._send_json(200, result)
             elif section == 'context':
-                self._send_json(200, {'name': 'mirage-mcp-v2', 'status': 'ok', 'port': PORT_NEW})
+                self._send_json(200, self._build_context_response(qs))
             elif section == 'ai':
                 # /api/v1/ai/context : Self-Describing System Interface.
                 # Pull-only manual that any AI client (Code, GPT, etc.) can
