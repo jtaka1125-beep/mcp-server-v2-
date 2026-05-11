@@ -1517,9 +1517,28 @@ def tool_memory_fastembed_rebuild(args: dict) -> dict:
         started = time.time()
         try:
             result = fastembed_rebuild(namespaces=namespaces)
+            # Chain HNSW rebuild so the index doesn't go out of sync with the
+            # new fastembed array. Without this, fastembed_search returns
+            # "index N out of bounds" errors when the HNSW still references
+            # entry positions from the previous build (observed 2026-05-11:
+            # HNSW had 5304 entries cached, fastembed rebuilt to 5268 -> all
+            # searches hitting positions 5268..5303 errored). Best-effort:
+            # if HNSW rebuild fails, the fastembed rebuild itself is still
+            # considered successful and is logged separately.
+            hnsw_info = None
+            if result.get('ok'):
+                try:
+                    from memory_store import hnsw_rebuild
+                    t_h = time.time()
+                    hnsw_info = hnsw_rebuild()
+                    hnsw_info['rebuilt'] = True
+                    hnsw_info['elapsed_sec'] = round(time.time() - t_h, 2)
+                except Exception as he:
+                    hnsw_info = {'rebuilt': False, 'error': str(he)}
             with _jobs_lock:
                 _jobs[job_id]['state'] = 'done'
                 _jobs[job_id]['result'] = result
+                _jobs[job_id]['hnsw_chain'] = hnsw_info
                 _jobs[job_id]['duration_sec'] = round(time.time() - started, 2)
                 _jobs[job_id]['finished_at'] = time.time()
                 _write_fastembed_job_snapshot(job_id, _jobs[job_id])
