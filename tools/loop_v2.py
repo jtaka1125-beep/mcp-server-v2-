@@ -125,6 +125,16 @@ def tool_run_loop_v2(args: dict) -> str:
 # ---------------------------------------------------------------------------
 # loop_status
 # ---------------------------------------------------------------------------
+def _tool_run_dreaming_proxy(args: dict) -> str:
+    """Proxy to loop.py::tool_run_dreaming (dreaming implementation lives there)"""
+    try:
+        from tools.loop import tool_run_dreaming
+        return tool_run_dreaming(args)
+    except Exception as e:
+        import json
+        return json.dumps({'error': str(e), 'status': 'error'})
+
+
 def tool_loop_status(args: dict) -> str:
     job_id = (args or {}).get('job_id', '')
     disp = _get_loop_dispatcher()
@@ -191,5 +201,19 @@ TOOLS = {
             'job_id': {'type': 'string'},
         }},
         'handler': tool_loop_status,
+    },
+    'run_dreaming': {
+        'description': 'Post-session memory consolidation (Dreaming). Summarizes today decisions via qwen-3-235b (Cerebras free tier), records dreaming_summary, optional compact + link promotion. Async job.',
+        'schema': {'type': 'object', 'properties': {
+            'namespaces': {
+                'type': 'array', 'items': {'type': 'string'},
+                'description': 'Namespaces to process (default: all 4)',
+            },
+            'auto_compact': {
+                'type': 'boolean',
+                'description': 'Run compact if recommended (default: true)',
+            },
+        }},
+        'handler': _tool_run_dreaming_proxy,
     },
 }
