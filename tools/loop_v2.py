@@ -135,12 +135,45 @@ def _tool_run_dreaming_proxy(args: dict) -> str:
         return json.dumps({'error': str(e), 'status': 'error'})
 
 
+def _get_loop_jobs_from_loop_py() -> dict:
+    """loop.py の _loop_jobs を取得 (run_dreaming 等のジョブ)"""
+    try:
+        import tools.loop as lm
+        return getattr(lm, '_loop_jobs', {})
+    except Exception:
+        return {}
+
+
 def tool_loop_status(args: dict) -> str:
     job_id = (args or {}).get('job_id', '')
     disp = _get_loop_dispatcher()
     gs = gate_stats()
 
+    # run_dreaming は loop.py の _loop_jobs に入っている
+    # job_id 指定があれば先に loop.py から探す
+    if job_id:
+        loop_jobs = _get_loop_jobs_from_loop_py()
+        if job_id in loop_jobs:
+            import json
+            meta = loop_jobs[job_id]
+            elapsed = time.time() - meta.get('started_at', time.time())
+            steps = meta.get('steps', [])
+            return json.dumps({
+                'job_id': job_id,
+                'status': meta.get('status', '?'),
+                'engine': meta.get('engine', 'dreaming'),
+                'elapsed_s': round(elapsed, 1),
+                'steps': steps[-10:],  # 最新 10 ステップ
+                'errors': meta.get('result', {}).get('errors', []) if meta.get('result') else [],
+            }, ensure_ascii=False, indent=2)
+
     if not job_id:
+        # dispatcher + loop.py 両方のジョブを合算して表示
+        loop_jobs = _get_loop_jobs_from_loop_py()
+        dreaming_items = [
+            (jid, meta) for jid, meta in loop_jobs.items()
+            if meta.get('engine') == 'dreaming'
+        ]
         items = sorted(_registry.items(),
                        key=lambda kv: kv[1]['started_at'],
                        reverse=True)[:10]
