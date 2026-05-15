@@ -115,14 +115,37 @@ def tool_memory_compact(args: dict) -> dict:
     raw_count = len(msgs)
 
     # Mix in recent decisions
+    #
+    # [Fix 2026-05-15] full content via get_entry_full
+    #   旧: mem.search 経由で hits.snippet (240 char truncation) を content として使用
+    #       → LLM 入力時に decision body 1500+ chars が 240 chars に圧縮、
+    #         tonight 詳細が summary 反映されない (decision 94edecfa layer 2 bug)。
+    #   新: search hits の id を get_entry_full で full content fetch、
+    #       title + content をマージして LLM に渡す。
+    #   memory: mirage-infra 94edecfa (writer truncation bug 2 layers)
     decision_count = 0
     try:
+        from memory_store import get_entry_full
         dec_hits = mem.search(ns, query='', types=['decision'], limit=30)
         dec_msgs = []
         for h in dec_hits.get('hits', []):
+            hid = h.get('id', '')
+            full_content = ''
+            full_title = h.get('title', '')
+            if hid:
+                try:
+                    full = get_entry_full(hid)
+                    if isinstance(full, dict) and not full.get('error'):
+                        full_content = full.get('content', '') or ''
+                        full_title = full.get('title', '') or full_title
+                except Exception:
+                    full_content = ''
+            content_text = full_content or h.get('content', '') or h.get('snippet', '')
+            if full_title and full_title not in (content_text or '')[:200]:
+                content_text = f"[{full_title}]\n{content_text}"
             dec_msgs.append({
                 'role': 'decision',
-                'content': h.get('content', '') or h.get('snippet', ''),
+                'content': content_text,
                 'created_at': h.get('created_at', 0) or 0,
             })
         # Sort decisions newest first, then merge

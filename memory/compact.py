@@ -204,7 +204,12 @@ def _format_msgs_with_dates(msgs: list, max_msgs: int = 50) -> str:
             date_str = '日付不明'
 
         role = m.get('role', '?')
-        content = m.get('content', '')[:300]
+        # [Fix 2026-05-15] 300 → 800 chars
+        #   旧 300 char cap で decision body 1500+ chars が title 部分のみ抽出、
+        #   LLM 入力時に詳細 (= 修正内容/影響) が欠落、 summary timeline で
+        #   旧 prev_summary 内容を上書きできない bug の二次原因。
+        #   memory: mirage-infra 94edecfa layer 2 fix (writer truncation)
+        content = m.get('content', '')[:800]
         grouped.setdefault(date_str, []).append(f"  [{role}] {content}")
 
     # 新→古 順
